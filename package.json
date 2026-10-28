@@ -1,0 +1,51 @@
+{
+  "name": "dsh-sensenova-keypool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SenseNova provider with a multi-key pool and a Settings page for entering keys. Each DSH session is pinned to one key; automatic round-robin or manual selection. Also exposes an OpenAI-compatible local gateway with Chat Completions and Codex Responses endpoints.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./src/adapter": "./src/adapter.js",
+    "./src/catalog": "./src/catalog.js",
+    "./src/keypool": "./src/keypool.js",
+    "./src/settings": "./src/settings.js",
+    "./src/upstream": "./src/upstream.js",
+    "./src/stream": "./src/stream.js",
+    "./src/messages": "./src/messages.js",
+    "./src/responses": "./src/responses.js",
+    "./src/gateway": "./src/gateway.js",
+    "./client": "./client.js",
+    "./src/admin": "./src/admin.js",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "sensenova",
+    "llm-provider",
+    "multi-key",
+    "key-pool",
+    "codex",
+    "openai-responses"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "license": "MIT"
+}

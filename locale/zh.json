@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SenseNova 多 Key 池",
+    "description": "SenseNova provider 的多 Key 池与设置页：每个会话固定一个 Key，支持轮询或手动选择，并带 OpenAI 兼容本地网关。"
+  }
+}

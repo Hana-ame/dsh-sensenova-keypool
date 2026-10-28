@@ -1,0 +1,23 @@
+{
+  "baseURL": "https://token.sensenova.cn/v1",
+  "chatPath": "/chat/completions",
+  "mode": "auto",
+  "defaultKey": "k1",
+  "keys": [],
+  "timeoutMs": 120000,
+  "maxRetries": 3000,
+  "retryBaseDelayMs": 1000,
+  "retryMaxDelayMs": 6000,
+  "retryableCodes": [
+    "RATE_LIMIT",
+    "TIMEOUT",
+    "SERVER",
+    "TRANSPORT"
+  ],
+  "defaultModel": "deepseek-v4-flash",
+  "gateway": {
+    "enabled": true,
+    "path": "/api/sensenova-keypool/v1",
+    "token": ""
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SenseNova Key Pool",
+    "description": "SenseNova provider with a multi-key pool and settings page; each session pins one key, with round-robin or manual selection and an OpenAI-compatible local gateway."
+  }
+}

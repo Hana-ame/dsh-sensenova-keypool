@@ -1,0 +1,18 @@
+# Example Codex provider for dsh-sensenova-keypool.
+# Merge this block into ~/.codex/config.toml, then select the profile with
+# `codex --profile sensenova_keypool`.
+#
+# The gateway is served by the running DSH web process on 127.0.0.1:3080.
+# `env_key` only needs to be a set environment variable; the gateway ignores
+# the Authorization header unless `gateway.token` is configured.
+
+[model_providers.sensenova_keypool]
+name = "SenseNova Key Pool"
+base_url = "http://127.0.0.1:3080/api/sensenova-keypool/v1"
+env_key = "SENSENOVA_KEYPOOL_TOKEN"
+wire_api = "responses"
+http_headers = { "x-sensenova-session" = "codex-local", "x-sensenova-key" = "k1" }
+
+[profiles.sensenova_keypool]
+model_provider = "sensenova_keypool"
+model = "sensenova-6.8-flash-lite"
