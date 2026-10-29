@@ -38,6 +38,13 @@ export const DEFAULTS = Object.freeze({
   retryableCodes: Object.freeze(['RATE_LIMIT', 'TIMEOUT', 'SERVER', 'TRANSPORT']),
   maxRequestImageBytes: 20_971_520,
   defaultModel: 'deepseek-v4-flash',
+  // Auto-continue on max-token truncation: when SenseNova stops because the
+  // request output cap was reached (`finish_reason: "length"`), the adapter
+  // feeds the partial answer back with a short prompt and requests a
+  // continuation, up to `autoContinueRounds` extra requests per turn.
+  autoContinue: true,
+  autoContinueRounds: 8,
+  autoContinuePrompt: '继续',
   models: Object.freeze([
     Object.freeze({
       id: 'deepseek-v4-flash',
@@ -273,6 +280,17 @@ export function loadSettings(options = {}) {
   if (env.SENSENOVA_GATEWAY_ENABLED !== undefined) {
     settings.gateway.enabled = env.SENSENOVA_GATEWAY_ENABLED === '1' || env.SENSENOVA_GATEWAY_ENABLED === 'true'
   }
+  if (env.SENSENOVA_AUTO_CONTINUE !== undefined) {
+    settings.autoContinue = env.SENSENOVA_AUTO_CONTINUE === '1' || env.SENSENOVA_AUTO_CONTINUE === 'true'
+  }
+  if (env.SENSENOVA_AUTO_CONTINUE_ROUNDS !== undefined) {
+    const value = Number(env.SENSENOVA_AUTO_CONTINUE_ROUNDS)
+    if (Number.isInteger(value) && value >= 0) settings.autoContinueRounds = value
+  }
+  if (env.SENSENOVA_AUTO_CONTINUE_PROMPT !== undefined) {
+    const text = String(env.SENSENOVA_AUTO_CONTINUE_PROMPT).trim()
+    if (text !== '') settings.autoContinuePrompt = text
+  }
 
   settings.baseURL = String(settings.baseURL ?? DEFAULTS.baseURL).trim().replace(/\/+$/, '')
   settings.chatPath = normalizePath(settings.chatPath, DEFAULTS.chatPath)
@@ -293,6 +311,11 @@ export function loadSettings(options = {}) {
   settings.retryableCodes = normalizeRetryableCodes(settings.retryableCodes)
   settings.models = normalizeModels(settings.models)
   settings.keys = normalizeKeys(settings.keys)
+  settings.autoContinue = settings.autoContinue !== false
+  settings.autoContinueRounds = Number.isSafeInteger(settings.autoContinueRounds) && settings.autoContinueRounds >= 0
+    ? settings.autoContinueRounds
+    : DEFAULTS.autoContinueRounds
+  settings.autoContinuePrompt = String(settings.autoContinuePrompt ?? DEFAULTS.autoContinuePrompt).trim() || DEFAULTS.autoContinuePrompt
   settings.gateway.path = normalizePath(settings.gateway.path, DEFAULTS.gateway.path).replace(/\/+$/, '')
   settings.gateway.token = String(settings.gateway.token ?? '')
   settings.gateway.enabled = settings.gateway.enabled !== false

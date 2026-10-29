@@ -26,7 +26,7 @@ import {
 import { createKeyPool, createSessionKeyStore } from './keypool.js'
 import { toChatRequest } from './messages.js'
 import { postChat, readJson, UpstreamError } from './upstream.js'
-import { jsonToChunks, parseSseStream } from './stream.js'
+import { jsonToChunks, mergeUsage, parseSseStream } from './stream.js'
 import { validateSettings } from './settings.js'
 
 const sleepDefault = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -161,7 +161,21 @@ export class SensenovaKeyPoolAdapter {
   }
 
   /**
-   * One turn. The chosen key is fixed for the whole generator.
+   * One turn, with automatic continuation when SenseNova truncates the answer
+   * at the request output cap (`finish_reason: "length"` → `max-tokens`).
+   *
+   * The harness ends a step the moment its stream yields a `max-tokens`
+   * finish — there is no built-in "keep going". This adapter therefore loops
+   * itself: after a truncated round it feeds the partial answer back as an
+   * assistant message plus a short "continue" user message, re-dispatches with
+   * the same session-pinned key, and streams the continuation as fresh blocks
+   * (`startIndex` offset keeps block indexes unique inside one turn).
+   *
+   * The loop stops on any of: a natural `stop`/`tool-calls` finish, an error,
+   * a tool-call being produced (continuing a half-built call would corrupt
+   * it), the configured `autoContinueRounds` cap, or caller abort. Exactly one
+   * merged `usage` chunk and one final `finish` chunk are emitted for the whole
+   * turn, because the harness reads only the last usage/finish of a stream.
    *
    * @param {object} options - GenerateOptions
    * @returns {AsyncGenerator<object>}
@@ -187,7 +201,7 @@ export class SensenovaKeyPoolAdapter {
 
     const { settings } = picked
     const attachments = typeof this.deps.resolveAttachments === 'function' ? this.deps.resolveAttachments() : undefined
-    const { body } = await toChatRequest(
+    const { body: baseBody } = await toChatRequest(
       { ...options, model: options?.model ?? settings.defaultModel },
       {
         attachments,
@@ -199,64 +213,158 @@ export class SensenovaKeyPoolAdapter {
     const maxRetries = settings.maxRetries
     const sleep = this.deps.sleep ?? sleepDefault
 
-    let response = null
-    let lastError = null
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const autoContinue = settings.autoContinue !== false
+    const maxRounds = Number.isSafeInteger(settings.autoContinueRounds) && settings.autoContinueRounds >= 0
+      ? settings.autoContinueRounds
+      : 0
+    const continuePrompt = String(settings.autoContinuePrompt ?? '继续').trim() || '继续'
+
+    // One dispatch with the same retry scope as before. Each continuation round
+    // is a fresh HTTP request that reuses the session's key.
+    const dispatch = async body => {
+      let response = null
+      let lastError = null
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        try {
+          response = await postChat({
+            baseURL: settings.baseURL,
+            chatPath: settings.chatPath,
+            key: picked.key,
+            body,
+            signal,
+            timeoutMs: settings.timeoutMs,
+            fetchImpl: this.deps.fetchImpl,
+          })
+          break
+        } catch (error) {
+          lastError = error
+          const retryable = error instanceof UpstreamError && settings.retryableCodes.includes(error.code)
+          if (signal?.aborted === true || !retryable || attempt >= maxRetries) break
+          const retryAfterMs = Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0
+            ? error.retryAfterMs
+            : settings.retryBaseDelayMs * 2 ** attempt
+          const delay = Math.min(settings.retryMaxDelayMs, retryAfterMs)
+          this.deps.warn?.(
+            `sensenova-keypool: ${picked.alias} retry ${attempt + 1}/${maxRetries} in ${delay} ms (${error.code}): ${error.message}`,
+          )
+          await sleep(delay)
+          if (signal?.aborted === true) break
+        }
+      }
+      return { response, lastError }
+    }
+
+    const fail = reason => this.deps.warn?.(`sensenova-keypool: ${picked.alias} ${reason}`)
+
+    let messages = baseBody.messages
+    let startIndex = 0 // block-index offset: continuation blocks must not reuse harness indexes
+    let totalUsage
+    let streamedAnyText = false // text/reasoning produced across all rounds of this turn
+
+    for (let round = 0; ; round += 1) {
+      const body = round === 0 ? baseBody : { ...baseBody, messages }
+      const { response, lastError } = await dispatch(body)
+
+      if (response === null) {
+        const failure = failureOf(lastError)
+        if (round > 0 && streamedAnyText) {
+          // A continuation round failed after earlier text streamed: commit the
+          // partial answer instead of surfacing a transport error that would
+          // discard it (mirrors the sawContent → stop fallback in stream.js).
+          if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        } else {
+          yield { type: 'finish', reason: { kind: 'error', failure } }
+        }
+        return
+      }
+
+      const settleFailure = failure => {
+        const reason = round > 0 && streamedAnyText
+          ? { kind: 'stop' }
+          : { kind: 'error', failure }
+        return reason
+      }
+
+      let chunks
       try {
-        response = await postChat({
-          baseURL: settings.baseURL,
-          chatPath: settings.chatPath,
-          key: picked.key,
-          body,
-          signal,
-          timeoutMs: settings.timeoutMs,
-          fetchImpl: this.deps.fetchImpl,
-        })
-        break
+        const contentType = String(response.headers?.get?.('content-type') ?? '')
+        if (contentType.includes('application/json')) {
+          const json = await readJson(response)
+          chunks = jsonToChunks(json, { startIndex })
+        } else if (response.body === null || response.body === undefined) {
+          const json = await readJson(response)
+          chunks = jsonToChunks(json, { startIndex })
+        } else {
+          chunks = parseSseStream(response.body, { signal, startIndex })
+        }
       } catch (error) {
-        lastError = error
-        // The configured retry scope decides, not the boolean baked into the
-        // error: RATE_LIMIT (HTTP 429) is in the default scope, so a rate-limit
-        // window is retried up to `maxRetries` with the capped backoff below.
-        const retryable = error instanceof UpstreamError && settings.retryableCodes.includes(error.code)
-        if (signal?.aborted === true || !retryable || attempt >= maxRetries) break
-        // A 429 often carries Retry-After; honour it but keep the configured
-        // ceiling so a malicious/oversized header cannot stall the request.
-        const retryAfterMs = Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0
-          ? error.retryAfterMs
-          : settings.retryBaseDelayMs * 2 ** attempt
-        const delay = Math.min(settings.retryMaxDelayMs, retryAfterMs)
-        this.deps.warn?.(
-          `sensenova-keypool: ${picked.alias} retry ${attempt + 1}/${maxRetries} in ${delay} ms (${error.code}): ${error.message}`,
-        )
-        await sleep(delay)
-        if (signal?.aborted === true) break
-      }
-    }
-
-    if (response === null) {
-      yield { type: 'finish', reason: { kind: 'error', failure: failureOf(lastError) } }
-      return
-    }
-
-    try {
-      const contentType = String(response.headers?.get?.('content-type') ?? '')
-      if (contentType.includes('application/json')) {
-        const json = await readJson(response)
-        yield* jsonToChunks(json)
+        const reason = settleFailure(failureOf(error))
+        if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
+        yield { type: 'finish', reason }
         return
       }
-      if (response.body === null || response.body === undefined) {
-        const json = await readJson(response)
-        yield* jsonToChunks(json)
+
+      let roundFinish = null
+      let roundUsage
+      let roundToolCall = false
+      let roundBlocks = 0
+      let roundText = ''
+      let roundReasoning = ''
+      try {
+        for await (const chunk of chunks) {
+          if (chunk.type === 'block-start') {
+            roundBlocks += 1
+            yield chunk
+          } else if (chunk.type === 'block-end') {
+            if (chunk.block?.type === 'text' && typeof chunk.block.text === 'string') roundText += chunk.block.text
+            else if (chunk.block?.type === 'reasoning' && typeof chunk.block.text === 'string') roundReasoning += chunk.block.text
+            else if (chunk.block?.type === 'tool-call') roundToolCall = true
+            yield chunk
+          } else if (chunk.type === 'usage') {
+            roundUsage = mergeUsage(roundUsage, chunk.usage)
+          } else if (chunk.type === 'finish') {
+            roundFinish = chunk.reason
+          } else {
+            yield chunk
+          }
+        }
+      } catch (error) {
+        // The per-round parser already degrades mid-stream errors with content to
+        // `stop`; a hard throw here keeps the same policy.
+        const reason = settleFailure(failureOf(error))
+        if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
+        yield { type: 'finish', reason }
         return
       }
-      yield* parseSseStream(response.body, { signal })
-    } catch (error) {
-      yield {
-        type: 'finish',
-        reason: { kind: 'error', failure: failureOf(error) },
+
+      totalUsage = mergeUsage(totalUsage, roundUsage)
+      if (roundText !== '' || roundReasoning !== '') streamedAnyText = true
+      startIndex += roundBlocks
+
+      const truncated = roundFinish?.kind === 'max-tokens'
+      const canContinue = autoContinue
+        && truncated
+        && round < maxRounds
+        && !roundToolCall
+        && streamedAnyText
+        && signal?.aborted !== true
+      if (!canContinue) {
+        const finalReason = roundFinish?.kind === 'error' && streamedAnyText
+          ? { kind: 'stop' }
+          : roundFinish ?? { kind: 'stop' }
+        if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
+        yield { type: 'finish', reason: finalReason }
+        return
       }
+
+      fail(`auto-continue ${round + 1}/${maxRounds} after max-token truncation`)
+
+      // Feed the partial answer back so the model continues from exactly where
+      // it stopped; reasoning content keeps thinking models coherent.
+      const assistant = { role: 'assistant', content: roundText === '' ? null : roundText }
+      if (roundReasoning !== '') assistant.reasoning_content = roundReasoning
+      messages = [...messages, assistant, { role: 'user', content: continuePrompt }]
     }
   }
 }

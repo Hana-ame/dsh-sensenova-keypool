@@ -199,3 +199,54 @@ test('admin refuses non-loopback callers', async () => {
   const response = await invoke(admin, { address: '10.0.0.4' })
   assert.equal(response.status, 403)
 })
+
+test('auto-continue fields are exposed and saved', async () => {
+  const file = tempFile({
+    mode: 'auto',
+    defaultKey: 'k1',
+    keys: [{ alias: 'k1', key: 'sk-auto' }],
+    autoContinue: false,
+    autoContinueRounds: 2,
+    autoContinuePrompt: 'go on',
+  })
+  const admin = createAdmin({
+    settingsPath: file,
+    adapter: { status: () => ({ route: 'sensenova-pool', poolSize: 1 }) },
+  })
+  const initial = await invoke(admin)
+  assert.equal(initial.body.autoContinue, false)
+  assert.equal(initial.body.autoContinueRounds, 2)
+  assert.equal(initial.body.autoContinuePrompt, 'go on')
+
+  const response = await invoke(admin, {
+    method: 'POST',
+    body: {
+      keys: [{ alias: 'k1', key: '' }],
+      autoContinue: true,
+      autoContinueRounds: 5,
+      autoContinuePrompt: 'continue please',
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.body.autoContinue, true)
+  assert.equal(response.body.autoContinueRounds, 5)
+  const written = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(written.autoContinue, true)
+  assert.equal(written.autoContinueRounds, 5)
+  assert.equal(written.autoContinuePrompt, 'continue please')
+})
+
+test('auto-continue POST rejects invalid rounds', async () => {
+  const file = tempFile({
+    keys: [{ alias: 'k1', key: 'sk-auto' }],
+  })
+  const admin = createAdmin({
+    settingsPath: file,
+    adapter: { status: () => ({ route: 'sensenova-pool', poolSize: 1 }) },
+  })
+  const response = await invoke(admin, {
+    method: 'POST',
+    body: { keys: [{ alias: 'k1', key: '' }], autoContinueRounds: -1 },
+  })
+  assert.equal(response.status, 400)
+})

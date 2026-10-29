@@ -251,3 +251,181 @@ test('a user image block is encoded to an image_url data URL on the wire', async
   assert.equal(content[1].type, 'image_url')
   assert.match(content[1].image_url.url, /^data:image\/jpeg;base64,/)
 })
+
+// ── auto-continue on max-token truncation ────────────────────────────────
+
+function truncatedSse(parts, finish = 'length') {
+  const frames = parts.map((content, index) =>
+    `data: {"choices":[{"delta":{"content":"${content}"}}]}`,
+  )
+  frames.push(`data: {"choices":[{"delta":{},"finish_reason":"${finish}"}],"usage":{"prompt_tokens":1,"completion_tokens":${parts.length},"total_tokens":${parts.length + 1}}}`)
+  frames.push('data: [DONE]')
+  return new Response(`${frames.join('\n\n')}\n\n`, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+test('a length-truncated answer is auto-continued with the partial text as context', async () => {
+  const responses = [
+    truncatedSse(['part one ', 'part two ']), // finish_reason: length
+    truncatedSse(['part three'], 'stop'),
+  ]
+  const { adapter, calls } = adapterWith((url, init, callIndex) => responses[callIndex - 1] ?? sseResponse(), {
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'write a long answer' }],
+    sessionId: 'continue-session',
+  }))
+
+  // Two upstream requests, same key.
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].init.headers.authorization, 'Bearer sk-first-secret')
+  assert.equal(calls[1].init.headers.authorization, 'Bearer sk-first-secret')
+
+  // The continuation request carries the partial answer plus the prompt.
+  const secondBody = JSON.parse(calls[1].init.body)
+  const extra = secondBody.messages.slice(1)
+  assert.equal(extra.length, 2)
+  assert.deepEqual(extra[0], { role: 'assistant', content: 'part one part two ' })
+  assert.equal(extra[1].role, 'user')
+  assert.equal(extra[1].content, '继续')
+
+  // All text arrives, merged usage is one chunk, final finish is stop.
+  const text = chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  assert.equal(text, 'part one part two part three')
+  const usages = chunks.filter(c => c.type === 'usage')
+  assert.equal(usages.length, 1)
+  assert.equal(usages[0].usage.outputTokens, 3)
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+})
+
+test('auto-continue respects block index offsets per round', async () => {
+  const responses = [
+    truncatedSse(['first-']), // length
+    truncatedSse(['second'], 'stop'),
+  ]
+  const { adapter } = adapterWith((url, init, callIndex) => responses[callIndex - 1] ?? sseResponse(), {
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'offset-session',
+  }))
+
+  const starts = chunks.filter(c => c.type === 'block-start')
+  assert.deepEqual(starts.map(c => c.index), [0, 1])
+  const ends = chunks.filter(c => c.type === 'block-end')
+  assert.deepEqual(ends.map(c => c.index), [0, 1])
+})
+
+test('auto-continue can be disabled via settings', async () => {
+  const { adapter, calls } = adapterWith(() => truncatedSse(['cut ']), {
+    autoContinue: false,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'no-continue-session',
+  }))
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'max-tokens' })
+})
+
+test('autoContinueRounds caps the number of continuation requests', async () => {
+  let callCount = 0
+  const { adapter, calls } = adapterWith(() => {
+    callCount += 1
+    return truncatedSse([`round-${callCount}-`])
+  }, {
+    autoContinueRounds: 2,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'capped-session',
+  }))
+
+  // First request + 2 continuation rounds.
+  assert.equal(calls.length, 3)
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'max-tokens' })
+})
+
+test('a truncated tool-call round does not auto-continue', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\\"path\\":"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"a\\"}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  const { adapter, calls } = adapterWith(() => new Response(sse, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  }), {
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'tool-truncated-session',
+  }))
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'max-tokens' })
+})
+
+test('non-streaming JSON truncation auto-continues too', async () => {
+  const jsonRound = (content, finish) => new Response(JSON.stringify({
+    choices: [{ message: { content }, finish_reason: finish }],
+    usage: { prompt_tokens: 1, completion_tokens: content.length, total_tokens: content.length + 1 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  const { adapter, calls } = adapterWith((url, init, callIndex) =>
+    callIndex === 1 ? jsonRound('json part one ', 'length') : jsonRound('json part two', 'stop'), {
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'json-continue-session',
+  }))
+
+  assert.equal(calls.length, 2)
+  const text = chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  assert.equal(text, 'json part one json part two')
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+})
+
+test('a continuation-round transport failure keeps the partial answer', async () => {
+  const { adapter } = adapterWith((url, init, callIndex) => {
+    if (callIndex === 1) return truncatedSse(['partial '])
+    return new Response('boom', { status: 503, headers: { 'content-type': 'application/json' } })
+  }, {
+    maxRetries: 0,
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'drop-session',
+  }))
+
+  const text = chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  assert.equal(text, 'partial ')
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+})

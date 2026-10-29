@@ -89,6 +89,15 @@ function retryConfig(settings) {
   }
 }
 
+function autoContinueConfig(settings) {
+  const autoContinue = settings.autoContinue !== false
+  const rounds = Number.isSafeInteger(settings.autoContinueRounds) && settings.autoContinueRounds >= 0
+    ? settings.autoContinueRounds
+    : DEFAULTS.autoContinueRounds
+  const prompt = String(settings.autoContinuePrompt ?? DEFAULTS.autoContinuePrompt).trim() || DEFAULTS.autoContinuePrompt
+  return { autoContinue, autoContinueRounds: rounds, autoContinuePrompt: prompt }
+}
+
 function publicConfig(filename, settings, adapter) {
   const keys = normalizeKeys(settings.keys)
   const status = adapter.status()
@@ -112,6 +121,7 @@ function publicConfig(filename, settings, adapter) {
     keys: keys.map(entry => ({ alias: entry.alias, masked: entry.masked, enabled: entry.enabled !== false })),
     poolSize: status.poolSize,
     ...retryConfig(settings),
+    ...autoContinueConfig(settings),
   }
 }
 
@@ -207,6 +217,21 @@ export function createAdmin({ settingsPath, adapter, onSaved = () => {}, warn = 
         const retryableCodes = body.retryableCodes === undefined
           ? previousRetry.retryableCodes
           : normalizeRetryableCodes(body.retryableCodes)
+        // Auto-continue settings: optional on the wire, validated when present.
+        const previousAuto = autoContinueConfig(current)
+        const autoContinue = body.autoContinue === undefined
+          ? previousAuto.autoContinue
+          : body.autoContinue === true || body.autoContinue === 'true' || body.autoContinue === '1'
+        const autoContinueRounds = body.autoContinueRounds === undefined
+          ? previousAuto.autoContinueRounds
+          : Number(body.autoContinueRounds)
+        if (!Number.isSafeInteger(autoContinueRounds) || autoContinueRounds < 0 || autoContinueRounds > 100) {
+          throw new Error('autoContinueRounds must be an integer between 0 and 100')
+        }
+        const autoContinuePrompt = body.autoContinuePrompt === undefined
+          ? previousAuto.autoContinuePrompt
+          : String(body.autoContinuePrompt).trim()
+        if (autoContinuePrompt === '') throw new Error('autoContinuePrompt must not be empty')
         // Key/retry saves are model-neutral: this handler only changes the
         // key pool, assignment mode and retry policy. Model selection and the
         // model catalog stay under the caller's control.
@@ -219,6 +244,9 @@ export function createAdmin({ settingsPath, adapter, onSaved = () => {}, warn = 
           retryBaseDelayMs,
           retryMaxDelayMs,
           retryableCodes,
+          autoContinue,
+          autoContinueRounds,
+          autoContinuePrompt,
         }
         // Models are explicit: a key/retry-only save leaves both the list and
         // the default model untouched. A model edit must carry a valid list

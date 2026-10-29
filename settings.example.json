@@ -15,6 +15,9 @@
     "TRANSPORT"
   ],
   "defaultModel": "deepseek-v4-flash",
+  "autoContinue": true,
+  "autoContinueRounds": 8,
+  "autoContinuePrompt": "继续",
   "gateway": {
     "enabled": true,
     "path": "/api/sensenova-keypool/v1",

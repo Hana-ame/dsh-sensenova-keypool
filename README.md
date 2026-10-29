@@ -53,6 +53,38 @@ Bindings and the round-robin cursor persist in
 `~/.dsh/sensenova-keypool-state.json` (mode `0600`), so a DSH restart does not
 silently move existing sessions to another key.
 
+## Auto-continue on max-token truncation
+
+When SenseNova stops an answer because it hit the single-request output cap
+(`finish_reason: "length"`), the harness would normally end the turn there with
+a "max tokens" notice. This adapter instead loops itself: it feeds the partial
+answer back as an assistant message plus a short continuation prompt, sends a
+fresh request with the same session-pinned key, and streams the continuation as
+new blocks inside the **same turn** (block indexes are offset so the harness
+assembles one assistant message).
+
+The loop stops on: a natural `stop`/`tool-calls` finish, an error, a tool call
+being produced mid-truncation (resuming a half-built call would corrupt it), the
+`autoContinueRounds` cap, or caller abort. Exactly one merged `usage` chunk and
+one final `finish` chunk are emitted for the whole turn.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `autoContinue` | `true` | enable continuation on `length` truncation |
+| `autoContinueRounds` | `8` | max continuation requests per turn (`0` = disabled) |
+| `autoContinuePrompt` | `继续` | user message appended after the partial answer |
+
+Environment overrides (headless/CI):
+
+| Variable | Effect |
+|---|---|
+| `SENSENOVA_AUTO_CONTINUE` | `0` / `false` disables auto-continue |
+| `SENSENOVA_AUTO_CONTINUE_ROUNDS` | continuation cap per turn |
+| `SENSENOVA_AUTO_CONTINUE_PROMPT` | continuation prompt text |
+
+The three fields are also editable on the Settings page and survive key/retry
+saves (they are preserved by the admin route).
+
 ## Configuration
 
 Keys are entered in exactly one place: **Settings → SenseNova Key Pool** in the

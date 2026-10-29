@@ -81,6 +81,11 @@ window.__ModuleLoader__.load({
         codeTimeout: 'TIMEOUT — 408 / 504 / 请求超时',
         codeServer: 'SERVER — 5xx 上游错误',
         codeTransport: 'TRANSPORT — 网络 / 连接失败',
+        autoContinueSection: '长度截断自动继续',
+        autoContinueHint: '回答因达到单次输出上限被截断（finish_reason = length）时，自动用已输出的部分作为上下文发起“继续”请求，直到自然结束或达到次数上限。',
+        autoContinue: '启用自动继续',
+        autoContinueRounds: '最多继续次数',
+        autoContinuePrompt: '继续提示词',
         route: '路由',
         settingsPath: '配置文件',
       },
@@ -143,6 +148,11 @@ window.__ModuleLoader__.load({
         codeTimeout: 'TIMEOUT — 408 / 504 / request timeout',
         codeServer: 'SERVER — 5xx upstream failure',
         codeTransport: 'TRANSPORT — network / connection failure',
+        autoContinueSection: 'Auto-continue on truncation',
+        autoContinueHint: 'When an answer is cut off by the single-request output cap (finish_reason = length), automatically continue using the partial output as context, until it finishes naturally or the round cap is reached.',
+        autoContinue: 'Enable auto-continue',
+        autoContinueRounds: 'Max continuation rounds',
+        autoContinuePrompt: 'Continuation prompt',
         route: 'Route',
         settingsPath: 'Settings file',
       },
@@ -302,6 +312,9 @@ window.__ModuleLoader__.load({
       const [retryBaseDelayMs, setRetryBaseDelayMs] = useState(1000)
       const [retryMaxDelayMs, setRetryMaxDelayMs] = useState(6000)
       const [retryableCodes, setRetryableCodes] = useState([])
+      const [autoContinue, setAutoContinue] = useState(true)
+      const [autoContinueRounds, setAutoContinueRounds] = useState(8)
+      const [autoContinuePrompt, setAutoContinuePrompt] = useState('继续')
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
@@ -327,6 +340,11 @@ window.__ModuleLoader__.load({
         setRetryableCodes(Array.isArray(payload.retryableCodes) && payload.retryableCodes.length > 0
           ? payload.retryableCodes
           : ['RATE_LIMIT', 'TIMEOUT', 'SERVER', 'TRANSPORT'])
+        setAutoContinue(payload.autoContinue !== false)
+        setAutoContinueRounds(Number.isSafeInteger(payload.autoContinueRounds) && payload.autoContinueRounds >= 0
+          ? payload.autoContinueRounds
+          : 8)
+        setAutoContinuePrompt(String(payload.autoContinuePrompt ?? '继续').trim() || '继续')
       }
 
       const load = async () => {
@@ -429,6 +447,9 @@ window.__ModuleLoader__.load({
               retryBaseDelayMs: Number(retryBaseDelayMs),
               retryMaxDelayMs: Number(retryMaxDelayMs),
               retryableCodes,
+              autoContinue,
+              autoContinueRounds: Number(autoContinueRounds),
+              autoContinuePrompt: String(autoContinuePrompt).trim(),
             }),
           })
           const payload = await response.json().catch(() => ({}))
@@ -660,6 +681,40 @@ window.__ModuleLoader__.load({
             )),
           ),
           h('p', { style: styles.hint }, t('retryCodesHint')),
+        ),
+        h('div', { style: styles.card },
+          h('h3', { style: styles.sectionTitle }, t('autoContinueSection')),
+          h('p', { style: styles.hint }, t('autoContinueHint')),
+          h('label', { style: styles.check },
+            h('input', {
+              type: 'checkbox',
+              checked: autoContinue,
+              onChange: event => setAutoContinue(event.target.checked),
+            }),
+            t('autoContinue'),
+          ),
+          h('div', { style: styles.retryGrid },
+            h('label', { style: styles.field },
+              h('span', { style: styles.hint }, t('autoContinueRounds')),
+              h('input', {
+                style: styles.input,
+                type: 'number',
+                min: 0,
+                step: 1,
+                value: autoContinueRounds,
+                onChange: event => setAutoContinueRounds(Number(event.target.value)),
+              }),
+            ),
+            h('label', { style: styles.field },
+              h('span', { style: styles.hint }, t('autoContinuePrompt')),
+              h('input', {
+                style: styles.input,
+                type: 'text',
+                value: autoContinuePrompt,
+                onChange: event => setAutoContinuePrompt(event.target.value),
+              }),
+            ),
+          ),
         ),
         h('div', { style: styles.footer },
           h('button', { type: 'button', style: styles.primary, disabled: busy, onClick: save }, busy ? t('saving') : t('saveAll')),

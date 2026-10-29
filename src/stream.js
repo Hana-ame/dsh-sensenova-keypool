@@ -46,6 +46,38 @@ export function mapUsage(usage) {
   return mapped
 }
 
+/**
+ * Merge two `mapUsage` snapshots by summing token fields. Used when one LLM
+ * turn is assembled from several upstream requests (auto-continue on
+ * max-token truncation): each request reports its own usage, and the harness
+ * only reads the last `usage` chunk, so the adapter must emit one merged total.
+ *
+ * @param {object | undefined} a
+ * @param {object | undefined} b
+ * @returns {object | undefined}
+ */
+export function mergeUsage(a, b) {
+  if (a === undefined || a === null || typeof a !== 'object') return b
+  if (b === undefined || b === null || typeof b !== 'object') return a
+  const keys = [
+    'inputTokens',
+    'outputTokens',
+    'totalTokens',
+    'cacheReadTokens',
+    'cacheWriteTokens',
+    'reasoningTokens',
+  ]
+  const merged = { ...a }
+  for (const key of keys) {
+    const av = Number(a[key] ?? 0)
+    const bv = Number(b[key] ?? 0)
+    if (Number.isFinite(av) && Number.isFinite(bv) && (av !== 0 || bv !== 0)) {
+      merged[key] = av + bv
+    }
+  }
+  return merged
+}
+
 export function mapFinishReason(reason) {
   switch (String(reason ?? '')) {
     case 'length':
@@ -77,10 +109,10 @@ function errorFromPayload(payload) {
 }
 
 class BlockSink {
-  constructor(emit) {
+  constructor(emit, startIndex = 0) {
     this.emit = emit
     this.blocks = new Map()
-    this.nextIndex = 0
+    this.nextIndex = startIndex
   }
 
   open(key, kind) {
@@ -176,15 +208,18 @@ function feedDelta(sink, delta, callIndex) {
  * Parse an SSE response body into DSH chunks.
  *
  * @param {ReadableStream<Uint8Array>} body
- * @param {{signal?: AbortSignal}} [options]
+ * @param {{signal?: AbortSignal, startIndex?: number}} [options] - `startIndex`
+ *   offsets the emitted block indexes so a continuation request's blocks do not
+ *   reuse indexes the harness has already assembled.
  * @returns {AsyncGenerator<object>}
  */
 export async function* parseSseStream(body, options = {}) {
   const signal = options.signal
+  const startIndex = Number.isSafeInteger(options.startIndex) && options.startIndex > 0 ? options.startIndex : 0
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const outbox = []
-  const sink = new BlockSink(chunk => outbox.push(chunk))
+  const sink = new BlockSink(chunk => outbox.push(chunk), startIndex)
   let buffer = ''
   let sawContent = false
   let sawDone = false
@@ -321,9 +356,11 @@ export async function* parseSseStream(body, options = {}) {
  * Project a non-streaming OpenAI JSON answer into chunks.
  *
  * @param {object} json
+ * @param {{startIndex?: number}} [options]
  * @returns {Generator<object>}
  */
-export function* jsonToChunks(json) {
+export function* jsonToChunks(json, options = {}) {
+  const startIndex = Number.isSafeInteger(options?.startIndex) && options.startIndex > 0 ? options.startIndex : 0
   if (json === null || typeof json !== 'object') {
     yield {
       type: 'finish',
@@ -338,7 +375,7 @@ export function* jsonToChunks(json) {
   }
 
   const outbox = []
-  const sink = new BlockSink(chunk => outbox.push(chunk))
+  const sink = new BlockSink(chunk => outbox.push(chunk), startIndex)
   const choice = json.choices?.[0]
   const message = choice?.message
   if (message !== null && typeof message === 'object') {

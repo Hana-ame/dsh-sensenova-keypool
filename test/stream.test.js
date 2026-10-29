@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { jsonToChunks, mapFinishReason, mapUsage, parseSseStream } from '../src/stream.js'
+import { jsonToChunks, mapFinishReason, mapUsage, mergeUsage, parseSseStream } from '../src/stream.js'
 
 function bodyOf(text) {
   const bytes = new TextEncoder().encode(text)
@@ -116,4 +116,32 @@ test('SSE frames split across chunks still parse', async () => {
   })
   const chunks = await collect(parseSseStream(body))
   assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'split')
+})
+
+test('parseSseStream honors startIndex for continuation blocks', async () => {
+  const sse = 'data: {"choices":[{"delta":{"content":"continued"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n'
+  const chunks = await collect(parseSseStream(bodyOf(sse), { startIndex: 3 }))
+  const starts = chunks.filter(c => c.type === 'block-start')
+  assert.deepEqual(starts.map(c => c.index), [3])
+  const ends = chunks.filter(c => c.type === 'block-end')
+  assert.deepEqual(ends.map(c => c.index), [3])
+})
+
+test('jsonToChunks honors startIndex for continuation blocks', () => {
+  const chunks = [...jsonToChunks({
+    choices: [{ message: { content: 'next' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }, { startIndex: 5 })]
+  const starts = chunks.filter(c => c.type === 'block-start')
+  assert.deepEqual(starts.map(c => c.index), [5])
+})
+
+test('mergeUsage sums token fields across rounds', () => {
+  const merged = mergeUsage(
+    { inputTokens: 10, outputTokens: 3, totalTokens: 13 },
+    { inputTokens: 5, outputTokens: 7, totalTokens: 12, reasoningTokens: 2 },
+  )
+  assert.deepEqual(merged, { inputTokens: 15, outputTokens: 10, totalTokens: 25, reasoningTokens: 2 })
+  assert.deepEqual(mergeUsage(undefined, { inputTokens: 1 }), { inputTokens: 1 })
+  assert.deepEqual(mergeUsage({ inputTokens: 1 }, undefined), { inputTokens: 1 })
 })
