@@ -123,3 +123,53 @@ test('unknown model ids are passed through unchanged', async () => {
   assert.equal(modelId, 'some-new-model')
   assert.equal(body.model, 'some-new-model')
 })
+
+test('nameless assistant tool calls are dropped from replay', async () => {
+  const { body } = await toChatRequest({
+    model: 'sensenova-6.8-flash-lite',
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'trying' },
+          { type: 'tool-call', id: 'call-1', name: '', arguments: '' },
+        ],
+      },
+    ],
+  })
+  const row = body.messages[0]
+  assert.equal(row.role, 'assistant')
+  assert.equal(row.content, 'trying')
+  assert.equal(row.tool_calls, undefined)
+})
+
+test('orphaned tool results are not replayed', async () => {
+  const { body } = await toChatRequest({
+    model: 'sensenova-6.8-flash-lite',
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', id: 'call-1', name: '', arguments: '' },
+        ],
+      },
+      { role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'Error: unknown tool \"\"' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', id: 'call_ok', name: 'read_file', arguments: '{"path":"a"}' },
+        ],
+      },
+      { role: 'tool', toolCallId: 'call_ok', content: [{ type: 'text', text: 'file body' }] },
+    ],
+  })
+  // The nameless call and its orphaned result are gone; the valid call survives.
+  const roles = body.messages.map(m => m.role)
+  assert.deepEqual(roles, ['assistant', 'assistant', 'tool'])
+  const assistant = body.messages[0]
+  assert.equal(assistant.tool_calls, undefined)
+  const valid = body.messages[1]
+  assert.equal(valid.tool_calls.length, 1)
+  assert.equal(valid.tool_calls[0].function.name, 'read_file')
+  assert.equal(body.messages[2].tool_call_id, 'call_ok')
+})

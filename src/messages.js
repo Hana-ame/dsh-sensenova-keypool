@@ -46,11 +46,13 @@ function toolCallsOf(content) {
   const calls = []
   for (const block of content) {
     if (block?.type !== 'tool-call') continue
+    const name = String(block.name ?? '')
+    if (name === '') continue
     calls.push({
       id: String(block.id ?? ''),
       type: 'function',
       function: {
-        name: String(block.name ?? ''),
+        name,
         arguments: typeof block.arguments === 'string' && block.arguments !== '' ? block.arguments : '{}',
       },
     })
@@ -146,6 +148,10 @@ export async function toChatRequest(options, imageDeps = {}) {
   const systemParts = []
   if (typeof options?.system === 'string' && options.system.trim() !== '') systemParts.push(options.system)
   const messages = []
+  // Call ids emitted in the most recent assistant tool_calls row. A paired
+  // `role: 'tool'` result whose id is not in this set is orphaned (its tool
+  // call was dropped, e.g. an empty-name call) and must not be replayed.
+  let liveToolCallIds = new Set()
 
   for (const message of options?.messages ?? []) {
     if (message === null || typeof message !== 'object') continue
@@ -158,9 +164,11 @@ export async function toChatRequest(options, imageDeps = {}) {
     }
 
     if (role === 'tool') {
+      const toolCallId = toolCallIdOf(message)
+      if (!liveToolCallIds.has(toolCallId)) continue
       messages.push({
         role: 'tool',
-        tool_call_id: toolCallIdOf(message),
+        tool_call_id: toolCallId,
         content: textOf(message.content),
       })
       continue
@@ -173,6 +181,7 @@ export async function toChatRequest(options, imageDeps = {}) {
       const row = { role: 'assistant', content: text === '' && toolCalls.length > 0 ? null : text }
       if (reasoning !== '') row.reasoning_content = reasoning
       if (toolCalls.length > 0) row.tool_calls = toolCalls
+      liveToolCallIds = new Set(toolCalls.map(call => call.id))
       messages.push(row)
       continue
     }

@@ -145,3 +145,93 @@ test('mergeUsage sums token fields across rounds', () => {
   assert.deepEqual(mergeUsage(undefined, { inputTokens: 1 }), { inputTokens: 1 })
   assert.deepEqual(mergeUsage({ inputTokens: 1 }, undefined), { inputTokens: 1 })
 })
+
+test('a tool-call delta without a function name never opens a block', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"hi "}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"","arguments":"{\\"a\\":1}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  const chunks = await collect(parseSseStream(bodyOf(sse)))
+  const starts = chunks.filter(c => c.type === 'block-start')
+  const dels = chunks.filter(c => c.type === 'tool-call-delta')
+  const ends = chunks.filter(c => c.type === 'block-end')
+  // Only the text block is opened; the nameless tool call is dropped entirely.
+  assert.deepEqual(starts.map(c => c.blockType), ['text'])
+  assert.equal(dels.length, 0)
+  assert.equal(ends.length, 1)
+  assert.deepEqual(ends[0].block, { type: 'text', text: 'hi ' })
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'tool-calls' })
+})
+
+test('tool call name arriving after arguments materializes the block', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"a\\":1}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"read_tool","arguments":""}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  const chunks = await collect(parseSseStream(bodyOf(sse)))
+  const starts = chunks.filter(c => c.type === 'block-start')
+  const ends = chunks.filter(c => c.type === 'block-end')
+  assert.deepEqual(starts.map(c => c.blockType), ['tool-call'])
+  assert.equal(ends.length, 1)
+  assert.equal(ends[0].block.type, 'tool-call')
+  assert.equal(ends[0].block.name, 'read_tool')
+  assert.equal(ends[0].block.arguments, '{"a":1}')
+})
+
+test('a nameless tool call with only argument deltas is dropped', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"a\\":1}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  const chunks = await collect(parseSseStream(bodyOf(sse)))
+  const starts = chunks.filter(c => c.type === 'block-start')
+  assert.equal(starts.length, 0)
+  assert.equal(chunks.filter(c => c.type === 'block-end').length, 0)
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'tool-calls' })
+})
+
+test('mid-stream error closes opened blocks and drops nameless tool calls', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"partial "}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"a\\":1}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    '',
+  ].join('\n')
+  // No [DONE] and no error frame — the stream simply ends with trailing text,
+  // which feeds the `!sawDone` tail path. Also exercise a real error frame.
+  const chunks = await collect(parseSseStream(bodyOf(sse)))
+  const ends = chunks.filter(c => c.type === 'block-end')
+  assert.deepEqual(ends.map(c => c.block.type), ['text'])
+  assert.deepEqual(ends[0].block, { type: 'text', text: 'partial ' })
+
+  const errorSse = [
+    'data: {"choices":[{"delta":{"content":"before "}}]}',
+    '',
+    'data: {"error":{"message":"mid-stream boom","type":"server_error"}}',
+    '',
+  ].join('\n')
+  const errorChunks = await collect(parseSseStream(bodyOf(errorSse)))
+  const errorEnds = errorChunks.filter(c => c.type === 'block-end')
+  assert.deepEqual(errorEnds.map(c => c.block.type), ['text'])
+  const finish = errorChunks.at(-1)
+  assert.equal(finish.reason.kind, 'stop') // sawContent → commit partial, not error
+  assert.equal(finish.reason.kind, 'stop')
+})

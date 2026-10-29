@@ -112,6 +112,7 @@ class BlockSink {
   constructor(emit, startIndex = 0) {
     this.emit = emit
     this.blocks = new Map()
+    this.pending = new Map()
     this.nextIndex = startIndex
   }
 
@@ -146,22 +147,82 @@ class BlockSink {
     this.emit({ type: 'reasoning-delta', index: block.index, text: delta })
   }
 
+  /**
+   * Record the identity of a tool call. The block is only opened (block-start
+   * emitted) once a function name is known: a tool-call without a name is
+   * unusable — the harness would try to dispatch `unknown tool ""`, store a
+   * degenerate block, and replay `function.name: ""` back, which the upstream
+   * rejects with 400 (function/name cannot be empty). Ids are buffered in
+   * `pending` until a name arrives; a nameless call is dropped at closeAll().
+   */
   toolStart(key, id, name) {
+    const existing = this.blocks.get(key)
+    if (existing !== undefined) {
+      if (typeof id === 'string' && id !== '') existing.id = id
+      if (typeof name === 'string' && name !== '') existing.name = name
+      return
+    }
+    if (typeof name !== 'string' || name === '') {
+      if (!this.pending.has(key)) this.pending.set(key, { id: '', name: '', args: '' })
+      if (typeof id === 'string' && id !== '') this.pending.get(key).id = id
+      return
+    }
     const block = this.open(key, 'tool-call')
+    block.name = name
+    const pending = this.pending.get(key)
     if (typeof id === 'string' && id !== '') block.id = id
-    if (typeof name === 'string' && name !== '') block.name = name
+    else if (pending !== undefined && pending.id !== '') block.id = pending.id
+    if (pending !== undefined && pending.args !== '') {
+      // Arguments arrived before the name on this call: materialize them now
+      // so the buffered fragment is not lost.
+      block.args = pending.args
+      this.emit({
+        type: 'tool-call-delta',
+        index: block.index,
+        id: block.id,
+        name: block.name,
+        argumentsDelta: pending.args,
+      })
+    }
+    if (pending !== undefined) this.pending.delete(key)
   }
 
   toolArgs(key, delta) {
     if (typeof delta !== 'string' || delta === '') return
+    const existing = this.blocks.get(key)
+    if (existing !== undefined) {
+      existing.args += delta
+      this.emit({
+        type: 'tool-call-delta',
+        index: existing.index,
+        id: existing.id,
+        ...(existing.name !== '' ? { name: existing.name } : {}),
+        argumentsDelta: delta,
+      })
+      return
+    }
+    // The block is not opened yet. Buffer the arguments fragment so that if a
+    // name arrives on a later delta the call materializes with its full
+    // arguments; a call that stays nameless is dropped by closeAll() and never
+    // leaks a degenerate tool-call block to the harness.
+    let pending = this.pending.get(key)
+    if (pending === undefined) {
+      pending = { id: '', name: '', args: '' }
+      this.pending.set(key, pending)
+    }
+    pending.args += delta
+    if (pending.name === '') return
     const block = this.open(key, 'tool-call')
-    block.args += delta
+    block.name = pending.name
+    if (pending.id !== '') block.id = pending.id
+    block.args = pending.args
+    this.pending.delete(key)
     this.emit({
       type: 'tool-call-delta',
       index: block.index,
       id: block.id,
-      ...(block.name !== '' ? { name: block.name } : {}),
-      argumentsDelta: delta,
+      name: block.name,
+      argumentsDelta: block.args,
     })
   }
 
@@ -171,15 +232,18 @@ class BlockSink {
         this.emit({ type: 'block-end', index: block.index, block: { type: 'text', text: block.text } })
       } else if (block.kind === 'reasoning' && block.text !== '') {
         this.emit({ type: 'block-end', index: block.index, block: { type: 'reasoning', text: block.text } })
-      } else if (block.kind === 'tool-call') {
+      } else if (block.kind === 'tool-call' && block.name !== '') {
         this.emit({
           type: 'block-end',
           index: block.index,
           block: { type: 'tool-call', id: block.id, name: block.name, arguments: block.args === '' ? '{}' : block.args },
         })
       }
+      // Nameless tool-call blocks are skipped: a degenerate call must not reach
+      // the harness (dispatch would fail, and replay would 400 on empty name).
     }
     this.blocks.clear()
+    this.pending.clear()
   }
 }
 
@@ -274,6 +338,9 @@ export async function* parseSseStream(body, options = {}) {
     } catch {
       // already closed
     }
+    // Close any blocks that were already opened so partial text/reasoning is
+    // not lost and a half-streamed tool call is finalized by what arrived.
+    sink.closeAll()
     while (outbox.length > 0) yield outbox.shift()
     if (signal?.aborted === true) {
       yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'caller cancelled' } } }

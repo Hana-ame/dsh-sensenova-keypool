@@ -85,6 +85,23 @@ Environment overrides (headless/CI):
 The three fields are also editable on the Settings page and survive key/retry
 saves (they are preserved by the admin route).
 
+## Tool calls without a function name
+
+A tool-call with an empty `function.name` is unusable: the model cannot be told
+to run it ("unknown tool ''"), and replaying it back in history makes the
+upstream reject the whole request with HTTP 400 `function/name cannot be
+empty`. The adapter guards both ends:
+
+- **Inbound (parser)**: a `tool_calls` delta is buffered until a non-empty
+  function name arrives; the tool-call block is only opened once the call is
+  nameable. A nameless call (or a stream that dies after an unnamed call
+  started) is dropped at stream close, so a degenerate `name:""` block never
+  reaches the harness and never enters the session history.
+- **Outbound (replay)**: assistant tool-call blocks with an empty name are
+  skipped when building the request body, and their orphaned `role:"tool"`
+  results are dropped too, so even history recorded before this fix cannot
+  poison a later request.
+
 ## Configuration
 
 Keys are entered in exactly one place: **Settings → SenseNova Key Pool** in the

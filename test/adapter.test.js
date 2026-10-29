@@ -429,3 +429,39 @@ test('a continuation-round transport failure keeps the partial answer', async ()
   assert.equal(text, 'partial ')
   assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
 })
+
+test('a nameless tool-call stream never yields a degenerate tool-call block', async () => {
+  // Mirrors the real failing sessions: upstream opens a tool-call block with no
+  // name/id, the harness would assemble {name:"",arguments:""}, dispatch
+  // "unknown tool ''", and the replay would 400 with function/name cannot be
+  // empty. The adapter must drop the nameless block entirely.
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"\\n\\n"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":""}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  const { adapter } = adapterWith(() => new Response(sse, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  }))
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'nameless-session',
+  }))
+
+  const toolStarts = chunks.filter(c => c.type === 'block-start' && c.blockType === 'tool-call')
+  const toolEnds = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call')
+  assert.equal(toolStarts.length, 0)
+  assert.equal(toolEnds.length, 0)
+  // The text is kept, the turn ends normally.
+  const text = chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  assert.equal(text, '\n\n')
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+})
