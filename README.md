@@ -68,6 +68,22 @@ being produced mid-truncation (resuming a half-built call would corrupt it), the
 `autoContinueRounds` cap, or caller abort. Exactly one merged `usage` chunk and
 one final `finish` chunk are emitted for the whole turn.
 
+Truncation is not trusted from the reason string alone, because some SenseNova
+backends cut an answer without reporting `length`. A round is also treated as
+truncated when its usage consumed the whole `max_tokens` cap we requested
+(`completion_tokens >= max_tokens`), whatever `finish_reason` says; in that case
+the final turn reason is `max-tokens`, never a natural `stop`. Values `length`,
+`max_tokens`, `max_output_tokens` and `max_completion_tokens` all map to a
+truncated finish.
+
+When the truncated round's input+output already fill the model context window
+(the "too long, cannot continue" case, typical of long agent sessions),
+appending a continuation cannot fit. The adapter then ends the turn with a
+`CONTEXT_WINDOW_EXCEEDED` failure instead of a partial answer; the harness's
+compaction plugin compacts the session and retries the step, so the agent loop
+keeps going instead of stopping at a cut-off reply. A continuation request that
+the upstream rejects as invalid/oversized is classified the same way.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | `autoContinue` | `true` | enable continuation on `length` truncation |

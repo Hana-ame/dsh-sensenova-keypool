@@ -82,6 +82,8 @@ export function mapFinishReason(reason) {
   switch (String(reason ?? '')) {
     case 'length':
     case 'max_tokens':
+    case 'max_output_tokens':
+    case 'max_completion_tokens':
       return { kind: 'max-tokens' }
     case 'tool_calls':
     case 'function_call':

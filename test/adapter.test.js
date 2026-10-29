@@ -430,6 +430,151 @@ test('a continuation-round transport failure keeps the partial answer', async ()
   assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
 })
 
+// ── truncation detection beyond the finish_reason string ──────────────────
+
+/** One SSE round whose usage is chosen explicitly (cap/context classification). */
+function usageSse({ parts = [], finish = 'stop', promptTokens = 1, completionTokens = 1 } = {}) {
+  const frames = parts.map(content => `data: {"choices":[{"delta":{"content":"${content}"}}]}`)
+  frames.push(
+    `data: {"choices":[{"delta":{},"finish_reason":"${finish}"}],` +
+      `"usage":{"prompt_tokens":${promptTokens},"completion_tokens":${completionTokens},` +
+      `"total_tokens":${promptTokens + completionTokens}}}`,
+  )
+  frames.push('data: [DONE]')
+  return new Response(`${frames.join('\n\n')}\n\n`, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+const SMALL_WINDOW_MODELS = [{
+  id: 'sensenova-6.8-flash-lite',
+  name: 'Lite',
+  contextWindow: 1000,
+  maxOutput: 384_000,
+  reasoning: true,
+  inputModalities: ['text'],
+}]
+
+test('a stop finish that consumed the whole output cap is auto-continued', async () => {
+  // Some SenseNova backends cut the answer without reporting `length`; the
+  // request cap being fully consumed is the real truncation signal.
+  const responses = [
+    usageSse({ parts: ['cut '], finish: 'stop', promptTokens: 10, completionTokens: 8 }),
+    usageSse({ parts: ['rest'], finish: 'stop', promptTokens: 20, completionTokens: 4 }),
+  ]
+  const { adapter, calls } = adapterWith((url, init, callIndex) => responses[callIndex - 1] ?? sseResponse(), {
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'write a long answer' }],
+    maxTokens: 8,
+    sessionId: 'saturated-session',
+  }))
+
+  assert.equal(calls.length, 2)
+  const text = chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  assert.equal(text, 'cut rest')
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+})
+
+test('a saturated stop finish never degrades the final reason to stop', async () => {
+  // Every round is cut at the cap: the turn must end as max-tokens (truncated),
+  // not as a natural stop, or the harness treats a cut answer as complete.
+  const { adapter, calls } = adapterWith(
+    () => usageSse({ parts: ['x'], finish: 'stop', promptTokens: 5, completionTokens: 8 }),
+    { autoContinueRounds: 1 },
+  )
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    maxTokens: 8,
+    sessionId: 'saturated-cap-session',
+  }))
+
+  assert.equal(calls.length, 2)
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'max-tokens' })
+})
+
+test('a truncated round that fills the context window surfaces CONTEXT_WINDOW_EXCEEDED', async () => {
+  // Mirrors the real 262144-token SenseNova sessions: the answer is cut with a
+  // tiny output because input+output already fill the window. Appending a
+  // continuation cannot fit, so the harness must compact and retry the step.
+  const { adapter, calls } = adapterWith(
+    () => usageSse({ parts: ['tiny'], finish: 'length', promptTokens: 990, completionTokens: 10 }),
+    {
+      autoContinueRounds: 4,
+      models: SMALL_WINDOW_MODELS,
+    },
+  )
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    maxTokens: 64,
+    sessionId: 'context-overflow-session',
+  }))
+
+  assert.equal(calls.length, 1)
+  const finish = chunks.at(-1)
+  assert.equal(finish.reason.kind, 'error')
+  assert.equal(finish.reason.failure.code, 'CONTEXT_WINDOW_EXCEEDED')
+  assert.match(finish.reason.failure.message, /compaction is required/)
+})
+
+test('a length stop below the cap but at the window edge is context overflow, not continuation', async () => {
+  // pi-ai calls this a "recoverable length": the provider stopped well below
+  // the requested cap because the window was already full.
+  const { adapter, calls } = adapterWith(
+    () => usageSse({ parts: ['tail'], finish: 'length', promptTokens: 995, completionTokens: 2 }),
+    {
+      autoContinueRounds: 4,
+      models: SMALL_WINDOW_MODELS,
+    },
+  )
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    maxTokens: 64,
+    sessionId: 'window-edge-session',
+  }))
+
+  assert.equal(calls.length, 1)
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.equal(chunks.at(-1).reason.failure.code, 'CONTEXT_WINDOW_EXCEEDED')
+})
+
+test('a continuation rejected as an invalid request becomes a context overflow', async () => {
+  // The round-0 body was accepted; a 400 on the grown continuation body means
+  // the prompt no longer fits. Reporting an error lets compaction retry the
+  // step instead of committing a cut answer as `stop`.
+  const { adapter, calls } = adapterWith((url, init, callIndex) => {
+    if (callIndex === 1) return truncatedSse(['partial '])
+    return new Response(
+      '{"error":{"message":"inference request is invalid","type":"invalid_request_error","code":"3"}}',
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    )
+  }, {
+    maxRetries: 0,
+    autoContinueRounds: 4,
+  })
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    sessionId: 'invalid-continuation-session',
+  }))
+
+  assert.equal(calls.length, 2)
+  const finish = chunks.at(-1)
+  assert.equal(finish.reason.kind, 'error')
+  assert.equal(finish.reason.failure.code, 'CONTEXT_WINDOW_EXCEEDED')
+})
+
 test('a nameless tool-call stream never yields a degenerate tool-call block', async () => {
   // Mirrors the real failing sessions: upstream opens a tool-call block with no
   // name/id, the harness would assemble {name:"",arguments:""}, dispatch

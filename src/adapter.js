@@ -171,6 +171,17 @@ export class SensenovaKeyPoolAdapter {
    * the same session-pinned key, and streams the continuation as fresh blocks
    * (`startIndex` offset keeps block indexes unique inside one turn).
    *
+   * Truncation is not taken on faith from the reason string alone: a round
+   * whose usage consumed the whole requested output cap is treated as
+   * truncated even when the provider reports `stop`, because some SenseNova
+   * backends cut the answer without saying `length`. When that round's
+   * input+output already fill the model context window, a continuation cannot
+   * fit, so the turn ends with a `CONTEXT_WINDOW_EXCEEDED` failure instead of a
+   * plain truncation: the harness compacts the session and retries the step,
+   * which is what keeps the agent flow alive for long conversations. A
+   * continuation request rejected as an invalid/oversized request is
+   * classified the same way.
+   *
    * The loop stops on any of: a natural `stop`/`tool-calls` finish, an error,
    * a tool-call being produced (continuing a half-built call would corrupt
    * it), the configured `autoContinueRounds` cap, or caller abort. Exactly one
@@ -256,10 +267,66 @@ export class SensenovaKeyPoolAdapter {
 
     const fail = reason => this.deps.warn?.(`sensenova-keypool: ${picked.alias} ${reason}`)
 
+    // Output cap and context window let one round be classified as truncated
+    // even when the provider does not report `finish_reason: "length"`:
+    //   - `capSaturated`: the round consumed exactly the cap we requested, so
+    //     the answer was cut by the output limit whatever the reason string says.
+    //   - `nearContextLimit`: input+output already fill the model window, so a
+    //     continuation request could only be rejected; the harness must compact
+    //     first (CONTEXT_WINDOW_EXCEEDED → compaction retry, i.e. the agent loop
+    //     continues instead of ending the turn on a truncated answer).
+    const requestMaxTokens = Number.isSafeInteger(baseBody.max_tokens) && baseBody.max_tokens > 0
+      ? baseBody.max_tokens
+      : undefined
+    let contextWindow
+    try {
+      const info = resolveModelInfo(ROUTE, options?.model ?? settings.defaultModel, settings.models)
+      const value = Number(info?.context?.contextWindow)
+      if (Number.isFinite(value) && value > 0) contextWindow = value
+    } catch {
+      contextWindow = undefined
+    }
+    const nearContextLimit = usage => {
+      if (contextWindow === undefined || usage === undefined || usage === null) return false
+      const input = Number(usage.inputTokens ?? 0)
+      const output = Number(usage.outputTokens ?? 0)
+      if (!Number.isFinite(input) || !Number.isFinite(output)) return false
+      const slack = Math.min(1024, Math.floor(contextWindow * 0.02))
+      return input + output >= contextWindow - slack
+    }
+    const capSaturated = usage => {
+      if (requestMaxTokens === undefined || usage === undefined || usage === null) return false
+      const output = Number(usage.outputTokens ?? 0)
+      return Number.isFinite(output) && output >= requestMaxTokens
+    }
+    const isTruncatedRound = (roundFinish, roundUsage) => {
+      if (roundFinish?.kind === 'max-tokens') return true
+      // A provider may stop without saying `length` while still consuming the
+      // whole cap; the token count is stronger evidence than the reason string.
+      return capSaturated(roundUsage) && roundFinish?.kind !== 'tool-calls'
+    }
+    const contextOverflowFailure = (usage, detail) => {
+      const counts = usage === undefined
+        ? ''
+        : ` (input ${Number(usage.inputTokens ?? 0)} + output ${Number(usage.outputTokens ?? 0)} tokens)`
+      const window = contextWindow === undefined ? 'the model context window' : `the ${contextWindow}-token context window`
+      return {
+        kind: 'error',
+        failure: {
+          code: 'CONTEXT_WINDOW_EXCEEDED',
+          message:
+            `sensenova-keypool: response truncated at ${window}${counts}` +
+            `${detail === undefined || detail === '' ? '' : `: ${detail}`}` +
+            '; compaction is required to continue',
+        },
+      }
+    }
+
     let messages = baseBody.messages
     let startIndex = 0 // block-index offset: continuation blocks must not reuse harness indexes
     let totalUsage
     let streamedAnyText = false // text/reasoning produced across all rounds of this turn
+    let lastRoundUsage
 
     for (let round = 0; ; round += 1) {
       const body = round === 0 ? baseBody : { ...baseBody, messages }
@@ -268,9 +335,19 @@ export class SensenovaKeyPoolAdapter {
       if (response === null) {
         const failure = failureOf(lastError)
         if (round > 0 && streamedAnyText) {
-          // A continuation round failed after earlier text streamed: commit the
-          // partial answer instead of surfacing a transport error that would
-          // discard it (mirrors the sawContent → stop fallback in stream.js).
+          // The continuation request failed. A rejected (invalid/oversized)
+          // request means the grown prompt no longer fits: report a context
+          // overflow so the harness compacts and retries this step, instead of
+          // silently committing a truncated answer as `stop`.
+          if (failure.code === 'BAD_REQUEST' || failure.code === 'INVALID_REQUEST') {
+            fail(`continuation rejected (${failure.code}), treating as context overflow: ${failure.message}`)
+            if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
+            yield { type: 'finish', reason: contextOverflowFailure(lastRoundUsage, failure.message) }
+            return
+          }
+          // Any other continuation failure: commit the partial answer instead of
+          // surfacing a transport error that would discard it (mirrors the
+          // sawContent → stop fallback in stream.js).
           if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
           yield { type: 'finish', reason: { kind: 'stop' } }
         } else {
@@ -339,10 +416,27 @@ export class SensenovaKeyPoolAdapter {
       }
 
       totalUsage = mergeUsage(totalUsage, roundUsage)
+      lastRoundUsage = roundUsage
       if (roundText !== '' || roundReasoning !== '') streamedAnyText = true
       startIndex += roundBlocks
 
-      const truncated = roundFinish?.kind === 'max-tokens'
+      const truncated = isTruncatedRound(roundFinish, roundUsage)
+      if (truncated && roundFinish?.kind !== 'max-tokens') {
+        // Visible in the Host log: the provider cut the answer without saying
+        // `length`, and only the token accounting caught it.
+        fail(`truncation inferred from cap saturation (finish=${roundFinish?.kind ?? 'none'}, output=${roundUsage?.outputTokens ?? '?'}/${requestMaxTokens ?? '?'})`)
+      }
+      if (truncated && nearContextLimit(roundUsage)) {
+        // The answer was cut because the prompt already fills the window:
+        // appending a continuation request would only grow an unsendable body.
+        // Surface a context overflow so the harness compacts and retries the
+        // step, which is the only way the agent loop can keep going here.
+        fail(`context window full at truncation (input=${roundUsage?.inputTokens ?? '?'} + output=${roundUsage?.outputTokens ?? '?'} of ${contextWindow ?? '?'}); handing off to compaction`)
+        if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
+        yield { type: 'finish', reason: contextOverflowFailure(roundUsage) }
+        return
+      }
+
       const canContinue = autoContinue
         && truncated
         && round < maxRounds
@@ -350,9 +444,10 @@ export class SensenovaKeyPoolAdapter {
         && streamedAnyText
         && signal?.aborted !== true
       if (!canContinue) {
-        const finalReason = roundFinish?.kind === 'error' && streamedAnyText
-          ? { kind: 'stop' }
-          : roundFinish ?? { kind: 'stop' }
+        let finalReason
+        if (roundFinish?.kind === 'error' && streamedAnyText) finalReason = { kind: 'stop' }
+        else if (truncated) finalReason = { kind: 'max-tokens' }
+        else finalReason = roundFinish ?? { kind: 'stop' }
         if (totalUsage !== undefined) yield { type: 'usage', usage: totalUsage }
         yield { type: 'finish', reason: finalReason }
         return

@@ -25,8 +25,11 @@ test('maps usage and finish reasons', () => {
     totalTokens: 15,
   })
   assert.deepEqual(mapFinishReason('length'), { kind: 'max-tokens' })
+  assert.deepEqual(mapFinishReason('max_tokens'), { kind: 'max-tokens' })
+  assert.deepEqual(mapFinishReason('max_output_tokens'), { kind: 'max-tokens' })
   assert.deepEqual(mapFinishReason('tool_calls'), { kind: 'tool-calls' })
   assert.deepEqual(mapFinishReason('stop'), { kind: 'stop' })
+  assert.deepEqual(mapFinishReason(undefined), { kind: 'stop' })
 })
 
 test('parses reasoning, text, tool calls and usage', async () => {
