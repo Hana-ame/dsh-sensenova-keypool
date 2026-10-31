@@ -222,7 +222,8 @@ Every row also has a **Test** button: it sends one `hi` through the real adapter
 path (key selection → request shaping → SSE → retry) and shows the latency, the
 key alias that answered, and the reply (or the upstream error). Tests run
 unbound — no session id is passed, so they do not pin a session to a key or
-write anything to `state.json`.
+write anything to `state.json`. A **Test key** selector next to the table sends
+`<model>@<alias>` instead, so a single key in the pool can be probed directly.
 
 ## Model selection
 

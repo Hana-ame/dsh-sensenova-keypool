@@ -57,6 +57,8 @@ window.__ModuleLoader__.load({
         testFailed: '✗ 失败',
         testKey: 'key',
         testHint: '给这个模型发一条 hi，验证 key 与模型是否真的可用（不绑定当前会话）。',
+        testKeyLabel: '测试用 key',
+        testKeyDefault: '默认 key（轮询）',
         enable: '启用',
         disable: '禁用',
         disabled: '已禁用',
@@ -145,6 +147,8 @@ window.__ModuleLoader__.load({
         testFailed: '✗ Failed',
         testKey: 'key',
         testHint: 'Send one "hi" to this model to verify the key actually works (does not bind the current session).',
+        testKeyLabel: 'Test key',
+        testKeyDefault: 'Default key (round-robin)',
         enable: 'Enable',
         disable: 'Disable',
         disabled: 'Disabled',
@@ -428,6 +432,8 @@ window.__ModuleLoader__.load({
       const [perKeyModels, setPerKeyModels] = useState(true)
       // Per-model "test" results, keyed by row uid: { busy, ok, latencyMs, key, text, error }
       const [tests, setTests] = useState({})
+      // Key used by the test buttons: '' = pool default, otherwise `<model>@<alias>`.
+      const [testKey, setTestKey] = useState('')
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
@@ -561,7 +567,13 @@ window.__ModuleLoader__.load({
           const response = await fetch(`${API}/test`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: String(model.id ?? '').trim() }),
+            body: JSON.stringify({
+              // A specific key can be probed by sending `<model>@<alias>`; the
+              // adapter already understands that syntax and pins it.
+              model: String(model.id ?? '').trim().includes('@') || testKey === ''
+                ? String(model.id ?? '').trim()
+                : `${String(model.id ?? '').trim()}@${testKey}`,
+            }),
           })
           const payload = await response.json().catch(() => ({}))
           if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
@@ -868,6 +880,18 @@ window.__ModuleLoader__.load({
                 testLine(model),
               )),
           h('div', { style: styles.footer },
+            h('label', { style: { ...styles.field, minWidth: '150px' } },
+              h('span', { style: styles.hint }, t('testKeyLabel')),
+              h('select', {
+                style: styles.select,
+                value: testKey,
+                'aria-label': t('testKeyLabel'),
+                onChange: event => setTestKey(event.target.value),
+              },
+                h('option', { value: '', key: '__default' }, t('testKeyDefault')),
+                rows.filter(row => row.alias).map(row => h('option', { value: row.alias, key: row.alias }, row.alias)),
+              ),
+            ),
             h('button', { type: 'button', style: styles.button, disabled: busy, onClick: addModel }, t('addModel')),
             h('button', { type: 'button', style: styles.primary, disabled: busy, onClick: save }, busy ? t('saving') : t('saveModels')),
           ),
