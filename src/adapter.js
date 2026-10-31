@@ -107,7 +107,7 @@ export class SensenovaKeyPoolAdapter {
     })
   }
 
-  /** The route declares no provider-side image pricing (text-only projection). */
+  /** The route declares no provider-side image pricing; images ride as request content. */
   imageRequestPricing() {
     return undefined
   }
