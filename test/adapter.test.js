@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { SensenovaKeyPoolAdapter } from '../src/adapter.js'
+import { SensenovaKeyPoolAdapter, classifyQuotaError } from '../src/adapter.js'
+import { UpstreamError } from '../src/upstream.js'
 
 function tempState() {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sn-adapter-')), 'state.json')
@@ -639,4 +640,87 @@ test('perKeyModels:false keeps listModels to the plain round-robin rows', async 
   const { adapter } = adapterWith(() => sseResponse(), { perKeyModels: false })
   const rows = await adapter.listModels('sensenova-pool')
   assert.deepEqual(rows.map(row => row.id), ['sensenova-6.8-flash-lite'])
+})
+
+test('classifyQuotaError: 429 token-plan entitlement is a hard quota wall', () => {
+  const error = new UpstreamError('SenseNova HTTP 429: {"error":{"message":"token plan entitlement exhausted","type":"quota_exceeded_error","code":"8"}}', 'RATE_LIMIT', { status: 429, body: '{"error":{"message":"token plan entitlement exhausted"}}' })
+  assert.equal(classifyQuotaError(error), 'quota_exhausted')
+})
+
+test('classifyQuotaError: 429 rps/tpm exhausted is a transient rate bucket', () => {
+  const error = new UpstreamError('SenseNova HTTP 429: {"error":{"message":"rps exhausted","type":"quota_exceeded_error","code":"8"}}', 'RATE_LIMIT', { status: 429, body: '{"error":{"message":"rps exhausted"}}' })
+  assert.equal(classifyQuotaError(error), 'rate_limited')
+  const tpm = new UpstreamError('SenseNova HTTP 429: {"error":{"message":"tpm exhausted"}}', 'RATE_LIMIT', { status: 429, body: '{"error":{"message":"tpm exhausted"}}' })
+  assert.equal(classifyQuotaError(tpm), 'rate_limited')
+})
+
+test('classifyQuotaError: 401/403 is an invalid credential', () => {
+  const error = new UpstreamError('SenseNova HTTP 401: no', 'INVALID_CREDENTIAL', { status: 401 })
+  assert.equal(classifyQuotaError(error), 'invalid_credential')
+})
+
+test('classifyQuotaError: 5xx / unknown is an error', () => {
+  const server = new UpstreamError('SenseNova HTTP 503: down', 'SERVER', { status: 503 })
+  assert.equal(classifyQuotaError(server), 'error')
+  assert.equal(classifyQuotaError(new Error('boom')), 'error')
+})
+
+test('quota probes every enabled key and classifies the state', async () => {
+  const { adapter, calls } = adapterWith((url, init) => {
+    const auth = String(init?.headers?.authorization ?? '')
+    if (auth === 'Bearer sk-first-secret') {
+      return new Response('{"error":{"message":"token plan entitlement exhausted","type":"quota_exceeded_error","code":"8"}}', {
+        status: 429,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return new Response('{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
+  const result = await adapter.quota({ force: true, ttlMs: 0 })
+  assert.equal(result.ok, true)
+  assert.equal(result.cacheHit, false)
+  assert.equal(result.model, 'sensenova-6.8-flash-lite')
+  assert.equal(result.entries.length, 2)
+  const k1 = result.entries.find(entry => entry.alias === 'k1')
+  const k2 = result.entries.find(entry => entry.alias === 'k2')
+  assert.equal(k1.state, 'quota_exhausted')
+  assert.equal(k1.httpStatus, 429)
+  assert.equal(k2.state, 'healthy')
+  assert.equal(k2.httpStatus, 200)
+  assert.equal(k1.masked.includes('sk-first-secret'), false)
+  assert.equal(k2.masked.includes('sk-second-secret'), false)
+  // Each key gets one non-streaming probe capped at 2 output tokens.
+  assert.equal(calls.length, 2)
+  assert.equal(JSON.parse(calls[0].init.body).stream, false)
+  assert.equal(JSON.parse(calls[0].init.body).max_tokens, 2)
+})
+
+test('quota serves the cached snapshot within ttlMs and re-probes on force', async () => {
+  let probeCount = 0
+  const { adapter } = adapterWith(() => {
+    probeCount += 1
+    return new Response('{"id":"x","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}', { status: 200 })
+  })
+  const first = await adapter.quota({ force: true, ttlMs: 60_000 })
+  assert.equal(first.cacheHit, false)
+  assert.equal(probeCount, 2)
+  const cached = await adapter.quota({ ttlMs: 60_000 })
+  assert.equal(cached.cacheHit, true)
+  assert.equal(probeCount, 2)
+  const forced = await adapter.quota({ force: true, ttlMs: 60_000 })
+  assert.equal(forced.cacheHit, false)
+  assert.equal(probeCount, 4)
+})
+
+test('status() exposes the last quota snapshot (null before the first probe)', async () => {
+  const { adapter } = adapterWith(() => new Response('{"id":"x","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}', { status: 200 }))
+  assert.equal(adapter.status().quota, null)
+  await adapter.quota({ force: true, ttlMs: 0 })
+  const status = adapter.status()
+  assert.equal(status.quota.cacheHit, false)
+  assert.equal(status.quota.entries.length, 2)
+  assert.equal(status.quota.entries[0].alias, 'k1')
 })

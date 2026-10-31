@@ -90,6 +90,19 @@ window.__ModuleLoader__.load({
         autoContinuePrompt: '继续提示词',
         route: '路由',
         settingsPath: '配置文件',
+        quotaSection: '配额检测',
+        quotaHint: '对每把启用的 key 发一条最小请求探测配额状态：healthy 表示有额度；quota_exhausted 表示 token plan 已用尽（硬墙）；rate_limited 表示 rps/rpm/tpm 桶暂时打满；invalid_credential 表示 key 无效。SenseNova 的 OpenAI 兼容网关没有公开配额数字接口，真实余额只在 OAuth 登录的 console 里，所以这里给出的是状态而非数字。',
+        quotaFetch: '获取配额',
+        quotaFetching: '检测中…',
+        quotaCached: '本次为缓存结果',
+        quotaAt: '检测时间',
+        quotaModel: '检测模型',
+        stateHealthy: '正常',
+        stateRateLimited: '限流',
+        stateQuotaExhausted: '配额用尽',
+        stateInvalidCredential: '凭据无效',
+        stateError: '错误',
+        quotaNone: '还没有可检测的 key。',
       },
       en: {
         nav: 'SenseNova Key Pool',
@@ -159,6 +172,19 @@ window.__ModuleLoader__.load({
         autoContinuePrompt: 'Continuation prompt',
         route: 'Route',
         settingsPath: 'Settings file',
+        quotaSection: 'Quota probe',
+        quotaHint: 'Probe every enabled key with a minimal request to infer quota state: healthy = entitlement present; quota_exhausted = token plan spent (hard wall); rate_limited = rps/rpm/tpm bucket temporarily full; invalid_credential = key rejected. The SenseNova OpenAI-compatible gateway exposes no numeric quota endpoint — real balances live behind the OAuth console login — so this reports state, not numbers.',
+        quotaFetch: 'Fetch quota',
+        quotaFetching: 'Probing…',
+        quotaCached: 'This result is cached',
+        quotaAt: 'Checked at',
+        quotaModel: 'Probe model',
+        stateHealthy: 'Healthy',
+        stateRateLimited: 'Rate limited',
+        stateQuotaExhausted: 'Quota exhausted',
+        stateInvalidCredential: 'Invalid credential',
+        stateError: 'Error',
+        quotaNone: 'No enabled keys to probe.',
       },
     }
 
@@ -254,7 +280,7 @@ window.__ModuleLoader__.load({
       },
       modelRow: {
         display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1.35fr) minmax(0, 1fr) auto',
+        gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 1fr) auto auto',
         gap: '8px',
         alignItems: 'end',
       },
@@ -272,6 +298,37 @@ window.__ModuleLoader__.load({
         fontSize: '11px',
         color: 'var(--dsw-alias-label-secondary, #a8a8a8)',
       },
+      testResult: {
+        display: 'flex',
+        gap: '8px',
+        alignItems: 'baseline',
+        fontSize: '11px',
+        lineHeight: '1.5',
+        wordBreak: 'break-word',
+      },
+      quotaRow: {
+        display: 'flex',
+        gap: '10px',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        padding: '8px 0',
+        borderTop: '1px solid var(--dsw-alias-border-l2, #3a3a3a)',
+        fontSize: '12px',
+      },
+      quotaBadge: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '2px 10px',
+        borderRadius: '999px',
+        fontSize: '11px',
+        fontWeight: '600',
+      },
+      quotaMeta: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary, #888)' },
+      quotaError: { fontSize: '11px', color: 'var(--dsw-alias-state-error-primary, #ff6b6b)', wordBreak: 'break-word' },
+      testOk: { color: 'var(--dsw-alias-state-success-primary, #57c785)' },
+      testBad: { color: 'var(--dsw-alias-state-error-primary, #ff6b6b)' },
+      testText: { color: 'var(--dsw-alias-label-secondary, #a8a8a8)' },
       check: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #a8a8a8)' },
       // Fixed-height label row for control-only columns (checkboxes): keeps
       // them the same total height as a label+input `modelField` in the row.
@@ -315,6 +372,21 @@ window.__ModuleLoader__.load({
       return `model-${modelSeq}`
     }
 
+    // Probe-based quota state → badge colour + dict key. Colours are inline
+    // (not CSS vars) so the badge reads the same in any theme.
+    const QUOTA_STATE = {
+      healthy: { fg: '#57c785', bg: 'rgba(87, 199, 133, 0.16)', label: 'stateHealthy' },
+      rate_limited: { fg: '#e3b341', bg: 'rgba(227, 179, 65, 0.16)', label: 'stateRateLimited' },
+      quota_exhausted: { fg: '#ff6b6b', bg: 'rgba(255, 107, 107, 0.16)', label: 'stateQuotaExhausted' },
+      invalid_credential: { fg: '#b98bff', bg: 'rgba(185, 139, 255, 0.16)', label: 'stateInvalidCredential' },
+      error: { fg: '#ff9d5c', bg: 'rgba(255, 157, 92, 0.16)', label: 'stateError' },
+    }
+    const QUOTA_STATE_DEFAULT = QUOTA_STATE.error
+
+    function quotaBadge(state) {
+      return QUOTA_STATE[state] ?? QUOTA_STATE_DEFAULT
+    }
+
     function normalizeRows(config) {
       return (config?.keys ?? []).map(key => ({
         alias: String(key.alias ?? ''),
@@ -342,9 +414,36 @@ window.__ModuleLoader__.load({
       const [autoContinueRounds, setAutoContinueRounds] = useState(8)
       const [autoContinuePrompt, setAutoContinuePrompt] = useState('继续')
       const [perKeyModels, setPerKeyModels] = useState(true)
+      // Per-model "test" results, keyed by row uid: { busy, ok, latencyMs, key, text, error }
+      const [tests, setTests] = useState({})
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
+      const [quota, setQuota] = useState(null)
+      const [quotaBusy, setQuotaBusy] = useState(false)
+      const [quotaError, setQuotaError] = useState('')
+
+      // Auto-fetch quota once the settings page loads so the user sees each
+      // key's inferred state without clicking anything. A failed probe never
+      // blocks the page: it is reported inline and the button can retry.
+      const fetchQuota = async force => {
+        setQuotaBusy(true)
+        setQuotaError('')
+        try {
+          const response = await fetch(`${API}/quota`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ force: force === true }),
+          })
+          const payload = await response.json().catch(() => ({}))
+          if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
+          setQuota(payload)
+        } catch (probeError) {
+          setQuotaError(String(probeError?.message ?? probeError))
+        } finally {
+          setQuotaBusy(false)
+        }
+      }
 
       const applyConfig = payload => {
         setConfig(payload)
@@ -383,6 +482,8 @@ window.__ModuleLoader__.load({
           const payload = await response.json().catch(() => ({}))
           if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
           applyConfig(payload)
+          // After the key list is known, auto-probe quota if any key is enabled.
+          if ((payload?.keys ?? []).some(key => key.enabled !== false)) void fetchQuota(false)
         } catch (loadError) {
           setError(String(loadError?.message ?? loadError))
         }
@@ -561,6 +662,38 @@ window.__ModuleLoader__.load({
               )),
           h('div', { style: styles.footer },
             h('button', { type: 'button', style: styles.button, disabled: busy, onClick: addRow }, t('add')),
+          ),
+        ),
+        h('div', { style: styles.card },
+          h('h3', { style: styles.sectionTitle }, t('quotaSection')),
+          h('p', { style: styles.hint }, t('quotaHint')),
+          h('div', { style: styles.footer },
+            h('button', {
+              type: 'button',
+              style: styles.primary,
+              disabled: quotaBusy,
+              onClick: () => fetchQuota(true),
+            }, quotaBusy ? t('quotaFetching') : t('quotaFetch')),
+          ),
+          quotaError !== '' && h('p', { style: styles.quotaError }, quotaError),
+          quota !== null && h('div', null,
+            h('div', { style: styles.meta },
+              h('span', null, `${t('quotaModel')}: ${quota.model ?? ''}`),
+              h('span', null, `${t('quotaAt')}: ${quota.at ?? ''}`),
+              quota.cacheHit === true && h('span', null, t('quotaCached')),
+            ),
+            (Array.isArray(quota.entries) ? quota.entries : []).length === 0
+              ? h('p', { style: styles.hint }, t('quotaNone'))
+              : quota.entries.map(entry => {
+                const state = quotaBadge(entry.state)
+                return h('div', { key: entry.alias, style: styles.quotaRow },
+                  h('span', { style: { ...styles.quotaBadge, color: state.fg, background: state.bg } }, t(state.label)),
+                  h('span', null, entry.alias),
+                  h('span', { style: styles.quotaMeta }, entry.masked),
+                  typeof entry.latencyMs === 'number' && h('span', { style: styles.quotaMeta }, `${entry.latencyMs} ms`),
+                  entry.message !== undefined && h('span', { style: styles.quotaError }, String(entry.message).slice(0, 120)),
+                )
+              }),
           ),
         ),
         h('div', { style: styles.card },

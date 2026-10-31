@@ -274,6 +274,48 @@ export function createAdmin({ settingsPath, adapter, onSaved = () => {}, warn = 
         return
       }
 
+      // Settings-page "test" button: send one `hi` through the real adapter
+      // path (key selection / body shaping / SSE / retry) and report latency
+      // and the reply. Runs unbound (no sessionId), so it leaves no session-key
+      // binding behind.
+      if (req.method === 'POST' && suffix === '/test') {
+        const contentType = String(header(req, 'content-type') ?? '').toLowerCase()
+        if (!contentType.startsWith('application/json')) {
+          throw new Error('content-type must be application/json')
+        }
+        const body = await readBody(req)
+        const model = typeof body.model === 'string' ? body.model.trim() : ''
+        if (model === '' || model.length > 200) {
+          throw new Error('model must be a non-empty string (<= 200 chars)')
+        }
+        if (typeof adapter.testModel !== 'function') {
+          throw new Error('adapter does not support testModel')
+        }
+        sendJson(res, 200, await adapter.testModel({ model, timeoutMs: 30_000 }))
+        return
+      }
+
+      // Settings-page "quota" button: probe every enabled key with a minimal
+      // request and report each key's inferred quota state. `force: true`
+      // bypasses the cache so a manual click always re-probes; the default
+      // keeps repeated settings-page renders cheap.
+      if (req.method === 'POST' && suffix === '/quota') {
+        const contentType = String(header(req, 'content-type') ?? '').toLowerCase()
+        if (!contentType.startsWith('application/json')) {
+          throw new Error('content-type must be application/json')
+        }
+        const body = await readBody(req)
+        if (typeof adapter.quota !== 'function') {
+          throw new Error('adapter does not support quota')
+        }
+        const model = typeof body.model === 'string' ? body.model.trim() : ''
+        sendJson(res, 200, await adapter.quota({
+          ...(model !== '' && model.length <= 200 ? { model } : {}),
+          force: body.force === true || body.force === 'true',
+        }))
+        return
+      }
+
       sendError(res, 404, `unknown admin path ${pathname}`, 'NOT_FOUND')
     } catch (error) {
       warn(`sensenova-keypool admin: ${error?.message ?? error}`)
