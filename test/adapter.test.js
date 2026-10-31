@@ -683,3 +683,68 @@ test('testModel rejects an empty model id without touching the network', async (
   assert.equal(result.ok, false)
   assert.equal(calls.length, 0)
 })
+
+test('imageRequestPricing is synchronous and never touches settings I/O', () => {
+  const adapter = new SensenovaKeyPoolAdapter({
+    settingsSource: { current: () => { throw new Error('pricing must not read settings.json') } },
+    warn: () => {},
+  })
+  const pricing = adapter.imageRequestPricing('sensenova-pool', 'sensenova-6.8-flash-lite@k2')
+  const prices = pricing.priceImages([
+    { type: 'image', attachment: { attachmentId: 'sha256:9c85ac8a90838dff1165ddb00541d608002a573a6991af64e8da97466933fac5', mediaType: 'image/png', width: 1600, height: 1024 } },
+  ])
+  assert.equal(prices.length, 1)
+  // Retained images on this route carry no per-image sentence: only visual tokens count.
+  assert.equal(prices[0].text, '')
+  assert.ok(prices[0].visualTokens >= 96 && prices[0].visualTokens <= 384)
+})
+
+test('imageRequestPricing uses the settings-owned model list after a catalog call', async () => {
+  const { adapter } = adapterWith(() => sseResponse(), {
+    models: [
+      {
+        id: 'vision-model',
+        name: 'Vision',
+        contextWindow: 1_048_576,
+        maxOutput: 384_000,
+        reasoning: true,
+        inputModalities: ['text', 'image'],
+      },
+      {
+        id: 'text-model',
+        name: 'Text',
+        contextWindow: 1_048_576,
+        maxOutput: 384_000,
+        reasoning: true,
+        inputModalities: ['text'],
+      },
+    ],
+    defaultModel: 'vision-model',
+  })
+  await adapter.listModels('sensenova-pool')
+
+  const textOnly = adapter.imageRequestPricing('sensenova-pool', 'text-model').priceImages([
+    { type: 'image', attachment: { attachmentId: 'sha256:0123456789abcdef', mediaType: 'image/jpeg', width: 1600, height: 1024 } },
+  ])[0]
+  assert.equal(textOnly.visualTokens, 0)
+  assert.match(textOnly.text, /^\[image omitted because this model accepts text only; attachment sha256:01234567\]$/)
+
+  const retained = adapter.imageRequestPricing('sensenova-pool', 'vision-model').priceImages([
+    { type: 'image', attachment: { attachmentId: 'sha256:9c85ac8a90838dff1165ddb00541d608002a573a6991af64e8da97466933fac5', mediaType: 'image/png', width: 640, height: 480 } },
+  ])[0]
+  assert.equal(retained.text, '')
+  assert.ok(retained.visualTokens > 0)
+})
+
+test('imageRequestPricing marks offloaded occurrences as placeholder text', async () => {
+  const { adapter } = adapterWith(() => sseResponse())
+  await adapter.listModels('sensenova-pool')
+  const prices = adapter.imageRequestPricing('sensenova-pool', 'sensenova-6.8-flash-lite').priceImages([
+    { type: 'image', attachment: { attachmentId: 'sha256:9c85ac8a90838dff1165ddb00541d608002a573a6991af64e8da97466933fac5', mediaType: 'image/png', width: 1600, height: 1024 }, offloaded: true },
+    { type: 'image', attachment: { attachmentId: 'sha256:9c85ac8a90838dff1165ddb00541d608002a573a6991af64e8da97466933fac5', mediaType: 'image/png', width: 1600, height: 1024 } },
+  ])
+  assert.equal(prices.length, 2)
+  assert.deepEqual(prices[0], { visualTokens: 0, text: '[image omitted: offloaded]' })
+  assert.equal(prices[1].text, '')
+  assert.ok(prices[1].visualTokens > 0)
+})
