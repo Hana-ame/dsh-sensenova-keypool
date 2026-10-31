@@ -321,3 +321,34 @@ test('POST /quota requires JSON and forwards force, never leaking a raw key', as
   assert.equal(response.body.entries[0].state, 'healthy')
   assert.equal(JSON.stringify(response.body).includes('sk-secret-one'), false)
 })
+
+test('POST /test runs a one-shot hi through the adapter', async () => {
+  const adapter = { testModel: async ({ model }) => ({ ok: true, model, key: 'k1', latencyMs: 12, text: '你好' }) }
+  const handler = createAdmin({ settingsPath: tempFile({ keys: [], models: [] }), adapter })
+  const response = await invoke(handler, {
+    method: 'POST',
+    url: '/api/sensenova-keypool/admin/test',
+    body: { model: 'sensenova-6.8-flash-lite' },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.body.ok, true)
+  assert.equal(response.body.text, '你好')
+})
+
+test('POST /test validates the model and stays loopback-only', async () => {
+  const adapter = { testModel: async () => ({ ok: true }) }
+  const handler = createAdmin({ settingsPath: tempFile({ keys: [], models: [] }), adapter })
+  const empty = await invoke(handler, {
+    method: 'POST',
+    url: '/api/sensenova-keypool/admin/test',
+    body: { model: '' },
+  })
+  assert.equal(empty.status, 400)
+  const remote = await invoke(handler, {
+    method: 'POST',
+    url: '/api/sensenova-keypool/admin/test',
+    body: { model: 'x' },
+    address: '10.1.2.3',
+  })
+  assert.equal(remote.status, 403)
+})

@@ -51,6 +51,12 @@ window.__ModuleLoader__.load({
         newPlaceholder: 'sk-...',
         add: '添加一个 key',
         remove: '移除',
+        test: '测试',
+        testing: '发送 hi…',
+        testOk: '✓ 通',
+        testFailed: '✗ 失败',
+        testKey: 'key',
+        testHint: '给这个模型发一条 hi，验证 key 与模型是否真的可用（不绑定当前会话）。',
         enable: '启用',
         disable: '禁用',
         disabled: '已禁用',
@@ -133,6 +139,12 @@ window.__ModuleLoader__.load({
         newPlaceholder: 'sk-...',
         add: 'Add a key',
         remove: 'Remove',
+        test: 'Test',
+        testing: 'Sending hi…',
+        testOk: '✓ OK',
+        testFailed: '✗ Failed',
+        testKey: 'key',
+        testHint: 'Send one "hi" to this model to verify the key actually works (does not bind the current session).',
         enable: 'Enable',
         disable: 'Disable',
         disabled: 'Disabled',
@@ -538,6 +550,48 @@ window.__ModuleLoader__.load({
         }))
       }
 
+      /**
+       * 「测试」按钮：给这一行的模型发一条 `hi`，显示耗时/用的 key/回复。
+       * 走后端 POST /test（服务端用适配器真实链路，key 不经过浏览器）。
+       */
+      const runTest = async model => {
+        const uid = model.uid
+        setTests(current => ({ ...current, [uid]: { busy: true } }))
+        try {
+          const response = await fetch(`${API}/test`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model: String(model.id ?? '').trim() }),
+          })
+          const payload = await response.json().catch(() => ({}))
+          if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
+          setTests(current => ({ ...current, [uid]: payload }))
+        } catch (cause) {
+          setTests(current => ({
+            ...current,
+            [uid]: { ok: false, error: { message: String(cause?.message ?? cause) } },
+          }))
+        }
+      }
+
+      /** Render the last test result for one model row (相机一行：状态 + 回复片段). */
+      const testLine = model => {
+        const result = tests[model.uid]
+        if (result === undefined) return null
+        const ok = result.ok === true
+        const status = result.busy === true
+          ? t('testing')
+          : ok
+            ? `${t('testOk')} ${(Number(result.latencyMs) / 1000).toFixed(1)}s${result.key ? ` · ${t('testKey')}=${result.key}` : ''}`
+            : `${t('testFailed')}${result.error?.code ? ` [${result.error.code}]` : ''}: ${result.error?.message ?? ''}`
+        return h('div', { style: styles.testResult },
+          h('span', { style: result.busy === true ? styles.testText : (ok ? styles.testOk : styles.testBad) }, status),
+          ok && result.text
+            ? h('span', { style: styles.testText }, `“${String(result.text).trim().slice(0, 160)}”`)
+            : null,
+        )
+      }
+
       const save = async () => {
         setBusy(true)
         setError('')
@@ -758,6 +812,13 @@ window.__ModuleLoader__.load({
                       onChange: event => updateModel(index, { name: event.target.value }),
                     }),
                   ),
+                  h('button', {
+                    type: 'button',
+                    style: styles.button,
+                    disabled: busy || tests[model.uid]?.busy === true,
+                    title: t('testHint'),
+                    onClick: () => void runTest(model),
+                  }, tests[model.uid]?.busy === true ? t('testing') : t('test')),
                   h('button', { type: 'button', style: styles.danger, disabled: busy, onClick: () => removeModel(index) }, t('remove')),
                 ),
                 h('div', { style: styles.modelRow2 },
@@ -804,6 +865,7 @@ window.__ModuleLoader__.load({
                     ),
                   ),
                 ),
+                testLine(model),
               )),
           h('div', { style: styles.footer },
             h('button', { type: 'button', style: styles.button, disabled: busy, onClick: addModel }, t('addModel')),

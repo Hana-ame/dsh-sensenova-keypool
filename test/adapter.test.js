@@ -724,3 +724,45 @@ test('status() exposes the last quota snapshot (null before the first probe)', a
   assert.equal(status.quota.entries.length, 2)
   assert.equal(status.quota.entries[0].alias, 'k1')
 })
+
+test('testModel sends a single hi through the pool key and reports latency', async () => {
+  const { adapter, calls } = adapterWith(() => sseResponse('你好'))
+  const result = await adapter.testModel({ model: 'sensenova-6.8-flash-lite' })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.text, '你好')
+  assert.equal(result.key, 'k1')
+  assert.equal(result.model, 'sensenova-6.8-flash-lite')
+  assert.equal(typeof result.latencyMs, 'number')
+  assert.equal(calls.length, 1)
+  const body = JSON.parse(calls[0].init.body)
+  assert.deepEqual(body.messages, [{ role: 'user', content: 'hi' }])
+  assert.ok(body.max_tokens > 0)
+})
+
+test('testModel with @alias uses that key without binding a session', async () => {
+  const { adapter, calls } = adapterWith(() => sseResponse('ok'))
+  const result = await adapter.testModel({ model: 'sensenova-6.8-flash-lite@k2' })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.key, 'k2')
+  assert.equal(calls[0].init.headers.authorization, 'Bearer sk-second-secret')
+  assert.equal(adapter.status().sessions?.length ?? 0, 0)
+})
+
+test('testModel reports an upstream failure as a result instead of throwing', async () => {
+  const { adapter } = adapterWith(() => new Response('{"error":{"message":"boom"}}', {
+    status: 500,
+    headers: { 'content-type': 'application/json' },
+  }))
+  const result = await adapter.testModel({ model: 'sensenova-6.8-flash-lite' })
+  assert.equal(result.ok, false)
+  assert.ok(result.error?.message)
+})
+
+test('testModel rejects an empty model id without touching the network', async () => {
+  const { adapter, calls } = adapterWith(() => sseResponse())
+  const result = await adapter.testModel({ model: '   ' })
+  assert.equal(result.ok, false)
+  assert.equal(calls.length, 0)
+})

@@ -218,6 +218,12 @@ the list to `settings.json`; it never syncs upstream and never changes a model
 on its own. The bottom-right DSH model picker is still where the active session
 model is chosen.
 
+Every row also has a **Test** button: it sends one `hi` through the real adapter
+path (key selection → request shaping → SSE → retry) and shows the latency, the
+key alias that answered, and the reply (or the upstream error). Tests run
+unbound — no session id is passed, so they do not pin a session to a key or
+write anything to `state.json`.
+
 ## Model selection
 
 Each advertised model uses a **1,048,576-token context window** and a
