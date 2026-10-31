@@ -7,8 +7,9 @@
  *
  * Key policy:
  *   - one key per session, decided on the session's first request;
- *   - `model@alias` is accepted as a hidden override and rebinds that session;
- *     the picker never advertises key-qualified model rows;
+ *   - `model@alias` pins that session to the named key; since 0.3.0 the picker
+ *     advertises those rows (`perKeyModels`, default on) so every key has its
+ *     own selectable model next to the round-robin/session-pinned rows;
  *   - mode=auto round-robins new sessions, mode=manual uses `defaultKey`;
  *   - retries reuse the same key. A 429/401 is this session's failure, never
  *     a reason to spend another key.
@@ -112,8 +113,11 @@ export class SensenovaKeyPoolAdapter {
   }
 
   async listModels(provider) {
-    const { settings } = this._ensure()
-    return catalogRows(provider ?? ROUTE, settings.models)
+    const { settings, pool } = this._ensure()
+    return catalogRows(provider ?? ROUTE, settings.models, {
+      keys: pool.aliases,
+      perKeyModels: settings.perKeyModels,
+    })
   }
 
   async resolveModel(provider, model) {

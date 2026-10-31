@@ -38,6 +38,11 @@ export const DEFAULTS = Object.freeze({
   retryableCodes: Object.freeze(['RATE_LIMIT', 'TIMEOUT', 'SERVER', 'TRANSPORT']),
   maxRequestImageBytes: 20_971_520,
   defaultModel: 'deepseek-v4-flash',
+  // Per-key model rows: besides the round-robin/session-pinned catalog, every
+  // enabled key alias is advertised as `<model>@<alias>` in the picker. Picking
+  // one pins that session to exactly that key (the pre-existing `model@alias`
+  // override, now visible instead of hidden).
+  perKeyModels: true,
   // Auto-continue on max-token truncation: when SenseNova stops because the
   // request output cap was reached (`finish_reason: "length"`), the adapter
   // feeds the partial answer back with a short prompt and requests a
@@ -291,6 +296,9 @@ export function loadSettings(options = {}) {
     const text = String(env.SENSENOVA_AUTO_CONTINUE_PROMPT).trim()
     if (text !== '') settings.autoContinuePrompt = text
   }
+  if (env.SENSENOVA_PER_KEY_MODELS !== undefined) {
+    settings.perKeyModels = env.SENSENOVA_PER_KEY_MODELS === '1' || env.SENSENOVA_PER_KEY_MODELS === 'true'
+  }
 
   settings.baseURL = String(settings.baseURL ?? DEFAULTS.baseURL).trim().replace(/\/+$/, '')
   settings.chatPath = normalizePath(settings.chatPath, DEFAULTS.chatPath)
@@ -316,6 +324,7 @@ export function loadSettings(options = {}) {
     ? settings.autoContinueRounds
     : DEFAULTS.autoContinueRounds
   settings.autoContinuePrompt = String(settings.autoContinuePrompt ?? DEFAULTS.autoContinuePrompt).trim() || DEFAULTS.autoContinuePrompt
+  settings.perKeyModels = settings.perKeyModels !== false
   settings.gateway.path = normalizePath(settings.gateway.path, DEFAULTS.gateway.path).replace(/\/+$/, '')
   settings.gateway.token = String(settings.gateway.token ?? '')
   settings.gateway.enabled = settings.gateway.enabled !== false

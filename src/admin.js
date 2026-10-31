@@ -119,6 +119,7 @@ function publicConfig(filename, settings, adapter) {
       inputModalities,
     })),
     keys: keys.map(entry => ({ alias: entry.alias, masked: entry.masked, enabled: entry.enabled !== false })),
+    perKeyModels: settings.perKeyModels !== false,
     poolSize: status.poolSize,
     ...retryConfig(settings),
     ...autoContinueConfig(settings),
@@ -232,6 +233,11 @@ export function createAdmin({ settingsPath, adapter, onSaved = () => {}, warn = 
           ? previousAuto.autoContinuePrompt
           : String(body.autoContinuePrompt).trim()
         if (autoContinuePrompt === '') throw new Error('autoContinuePrompt must not be empty')
+        // Per-key model rows: optional on the wire; absent keeps the current
+        // value so a key-only save does not silently flip the picker layout.
+        const perKeyModels = body.perKeyModels === undefined
+          ? current.perKeyModels !== false
+          : body.perKeyModels === true || body.perKeyModels === 'true' || body.perKeyModels === '1'
         // Key/retry saves are model-neutral: this handler only changes the
         // key pool, assignment mode and retry policy. Model selection and the
         // model catalog stay under the caller's control.
@@ -240,6 +246,7 @@ export function createAdmin({ settingsPath, adapter, onSaved = () => {}, warn = 
           keys: keys.map(entry => ({ alias: entry.alias, key: entry.key, enabled: entry.enabled !== false })),
           mode,
           defaultKey,
+          perKeyModels,
           maxRetries,
           retryBaseDelayMs,
           retryMaxDelayMs,

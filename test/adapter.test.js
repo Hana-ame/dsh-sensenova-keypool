@@ -610,3 +610,33 @@ test('a nameless tool-call stream never yields a degenerate tool-call block', as
   assert.equal(text, '\n\n')
   assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
 })
+
+test('listModels advertises one plain row plus one dedicated group per enabled key', async () => {
+  const { adapter } = adapterWith(() => sseResponse())
+  const rows = await adapter.listModels('sensenova-pool')
+  assert.deepEqual(rows.map(row => row.id), [
+    'sensenova-6.8-flash-lite',
+    'sensenova-6.8-flash-lite@k1',
+    'sensenova-6.8-flash-lite@k2',
+  ])
+  const pinned = rows[1]
+  assert.equal(pinned.name, 'Lite · k1')
+  assert.equal(pinned.description.endsWith('[key k1]'), true)
+})
+
+test('a disabled key contributes no dedicated model rows', async () => {
+  const { adapter } = adapterWith(() => sseResponse(), {
+    keys: [
+      { alias: 'k1', key: 'sk-first-secret', masked: 'sk-f…cret', enabled: true },
+      { alias: 'k2', key: 'sk-second-secret', masked: 'sk-s…cret', enabled: false },
+    ],
+  })
+  const rows = await adapter.listModels('sensenova-pool')
+  assert.deepEqual(rows.map(row => row.id), ['sensenova-6.8-flash-lite', 'sensenova-6.8-flash-lite@k1'])
+})
+
+test('perKeyModels:false keeps listModels to the plain round-robin rows', async () => {
+  const { adapter } = adapterWith(() => sseResponse(), { perKeyModels: false })
+  const rows = await adapter.listModels('sensenova-pool')
+  assert.deepEqual(rows.map(row => row.id), ['sensenova-6.8-flash-lite'])
+})

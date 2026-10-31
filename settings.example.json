@@ -15,6 +15,7 @@
     "TRANSPORT"
   ],
   "defaultModel": "deepseek-v4-flash",
+  "perKeyModels": true,
   "autoContinue": true,
   "autoContinueRounds": 8,
   "autoContinuePrompt": "继续",

@@ -250,3 +250,39 @@ test('auto-continue POST rejects invalid rounds', async () => {
   })
   assert.equal(response.status, 400)
 })
+
+test('per-key model rows: exposed on GET, saved on POST, kept when omitted', async () => {
+  const file = tempFile({
+    baseURL: 'https://example.test/v1',
+    mode: 'auto',
+    defaultKey: 'k1',
+    keys: [{ alias: 'k1', key: 'sk-secret-one' }],
+  })
+  const admin = createAdmin({
+    settingsPath: file,
+    adapter: { status: () => ({ route: 'sensenova-pool', poolSize: 1 }) },
+  })
+  const initial = await invoke(admin)
+  assert.equal(initial.body.perKeyModels, true)
+
+  const off = await invoke(admin, {
+    method: 'POST',
+    body: { keys: [{ alias: 'k1', key: '' }], perKeyModels: false },
+  })
+  assert.equal(off.status, 200)
+  assert.equal(off.body.perKeyModels, false)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).perKeyModels, false)
+
+  // A key-only save must not flip the flag back on.
+  const again = await invoke(admin, {
+    method: 'POST',
+    body: { keys: [{ alias: 'k1', key: '' }, { alias: 'k2', key: 'sk-two' }] },
+  })
+  assert.equal(again.body.perKeyModels, false)
+
+  const on = await invoke(admin, {
+    method: 'POST',
+    body: { keys: [{ alias: 'k1', key: '' }, { alias: 'k2', key: 'sk-two' }], perKeyModels: true },
+  })
+  assert.equal(on.body.perKeyModels, true)
+})

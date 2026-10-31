@@ -68,7 +68,9 @@ window.__ModuleLoader__.load({
         pool: '当前池子',
         poolSize: '可用 key 数',
         empty: '还没有配置 key。添加一个后保存。',
-        noSelection: '保存后到右下角的模型选择器里选 SenseNova · Key Pool。模型列表不再展开 key 别名；key 由 session 固定分配，手动默认在“分配方式”里设置。',
+        noSelection: '保存后到右下角的模型选择器里选 SenseNova · Key Pool。不带 @ 的模型走轮转/会话固定；带 @Key别名 的模型是该 key 的专用模型，选中即固定到它。',
+        perKeyModels: '为每个 key 生成专用模型（不轮询，固定该 key）',
+        perKeyModelsHint: '开启后，每个启用的 key 都会在模型选择器里多出一组“<模型> · <key别名>”（id 形如 deepseek-v4-flash@k2）。选中其中任意一条即把该会话固定到这把 key，永不参与轮询；新增一把 key 就多一组。不带 @ 的原始模型行照旧走轮转 / 手动默认。',
         retrySection: '重试',
         retryHint: '只对勾选的错误码重试；始终复用当前 session 已经固定的 key，不会切换到池子里的其他 key。',
         maxRetries: '最大重试次数',
@@ -135,7 +137,9 @@ window.__ModuleLoader__.load({
         pool: 'Current pool',
         poolSize: 'Available keys',
         empty: 'No keys configured yet. Add one and save.',
-        noSelection: 'After saving, open the model picker at the bottom-right and choose SenseNova · Key Pool. Key aliases are no longer expanded into model rows; the session store assigns one key, with manual default set above.',
+        noSelection: 'After saving, open the model picker at the bottom-right and choose SenseNova · Key Pool. Rows without @ use round-robin / the session key; rows carrying @alias are that key’s dedicated model and pin the session to it.',
+        perKeyModels: 'Advertise a dedicated model group per key (pinned, no round-robin)',
+        perKeyModelsHint: 'When on, every enabled key adds a group of “<model> · <alias>” rows (id like deepseek-v4-flash@k2). Picking one pins that session to exactly that key and never round-robins; adding a key adds a group. The plain rows without @ keep using round-robin / the manual default.',
         retrySection: 'Retry',
         retryHint: 'Only the checked failure codes are retried. Every retry reuses the key already pinned to this session and never consumes another pool key.',
         maxRetries: 'Maximum retries',
@@ -315,6 +319,7 @@ window.__ModuleLoader__.load({
       const [autoContinue, setAutoContinue] = useState(true)
       const [autoContinueRounds, setAutoContinueRounds] = useState(8)
       const [autoContinuePrompt, setAutoContinuePrompt] = useState('继续')
+      const [perKeyModels, setPerKeyModels] = useState(true)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
@@ -345,6 +350,7 @@ window.__ModuleLoader__.load({
           ? payload.autoContinueRounds
           : 8)
         setAutoContinuePrompt(String(payload.autoContinuePrompt ?? '继续').trim() || '继续')
+        setPerKeyModels(payload.perKeyModels !== false)
       }
 
       const load = async () => {
@@ -450,6 +456,7 @@ window.__ModuleLoader__.load({
               autoContinue,
               autoContinueRounds: Number(autoContinueRounds),
               autoContinuePrompt: String(autoContinuePrompt).trim(),
+              perKeyModels,
             }),
           })
           const payload = await response.json().catch(() => ({}))
@@ -494,6 +501,15 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.card },
           h('h3', { style: styles.sectionTitle }, t('keys')),
           h('p', { style: styles.hint }, t('keysHint')),
+          h('label', { style: styles.check },
+            h('input', {
+              type: 'checkbox',
+              checked: perKeyModels,
+              onChange: event => setPerKeyModels(event.target.checked),
+            }),
+            t('perKeyModels'),
+          ),
+          h('p', { style: styles.hint }, t('perKeyModelsHint')),
           rows.length === 0
             ? h('p', { style: styles.hint }, t('empty'))
             : rows.map((row, index) => h('div', { key: index, style: { ...styles.row, opacity: row.enabled === false ? 0.55 : 1 } },

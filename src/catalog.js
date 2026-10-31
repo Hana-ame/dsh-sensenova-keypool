@@ -17,6 +17,11 @@
  *   sensenova-6.8-flash-lite@k2 → model sensenova-6.8-flash-lite, key k2
  *   sensenova-6.8-flash-lite    → model sensenova-6.8-flash-lite, session key
  *
+ * Since 0.3.0 the picker advertises that suffix too: `catalogRows()` expands
+ * every enabled key into its own `@alias` row (see `perKeyModels` in
+ * `settings.json`), so a specific key can be chosen from the model picker
+ * directly instead of being a hidden, hand-typed override.
+ *
  * @module src/catalog
  */
 
@@ -139,22 +144,54 @@ export function maskKey(key) {
 /**
  * Build the picker catalog.
  *
- * Every model appears once. Key aliases are deliberately not expanded into
- * `model · key k2` rows: keys are managed on the Settings page and selected by
- * the session store, not by the model picker.
+ * Every model appears once as the session/round-robin row. When per-key rows
+ * are enabled (the default) each enabled key alias also gets a dedicated row
+ * per model, id-suffixed with `@<alias>`:
+ *
+ *   deepseek-v4-flash        → model, the session's assigned key
+ *   deepseek-v4-flash@k2     → model, pinned to key `k2`
+ *
+ * Picking a `@alias` row rebinds that session to the key (the same override a
+ * caller can type by hand in the model id), so each key has its own selectable
+ * model without touching round-robin or the manual default.
  *
  * @param {string} provider
  * @param {object[]} [models] - settings-owned model list; defaults to MODELS.
+ * @param {{keys?: string[], perKeyModels?: boolean}} [options]
  * @returns {object[]}
  */
-export function catalogRows(provider, models = MODELS) {
-  return models.map(model => ({
-    provider,
-    id: model.id,
-    name: model.name,
-    description: model.description,
-    inputModalities: [...(model.inputModalities ?? ['text'])],
-  }))
+export function catalogRows(provider, models = MODELS, options = {}) {
+  const keys = Array.isArray(options.keys)
+    ? options.keys.filter(alias => typeof alias === 'string' && alias !== '')
+    : []
+  const perKey = options.perKeyModels !== false && keys.length > 0
+  const rows = []
+  for (const model of models) {
+    const inputModalities = [...(model.inputModalities ?? ['text'])]
+    rows.push({
+      provider,
+      id: model.id,
+      name: model.name,
+      description: model.description,
+      inputModalities: [...inputModalities],
+    })
+    if (!perKey) continue
+    for (const alias of keys) {
+      rows.push({
+        provider,
+        id: keyQualifiedModelId(model.id, alias),
+        name: `${model.name} · ${alias}`,
+        description: `${model.description === '' ? '' : `${model.description} `}[key ${alias}]`,
+        inputModalities: [...inputModalities],
+      })
+    }
+  }
+  return rows
+}
+
+/** Build the key-qualified model id (`<model>@<alias>`). */
+export function keyQualifiedModelId(modelId, alias) {
+  return `${String(modelId ?? '').trim()}@${String(alias ?? '').trim()}`
 }
 
 /**
@@ -184,7 +221,9 @@ export function resolveModelInfo(provider, model, models = MODELS) {
     provider,
     id: model,
     name: alias === null ? base.name : `${base.name} · ${alias}`,
-    description: base.description,
+    description: alias === null || base.description === ''
+      ? base.description
+      : `${base.description} [key ${alias}]`,
     inputModalities: [...(base.inputModalities ?? ['text'])],
     context: { contextWindow: base.contextWindow },
     defaultMaxTokens: base.maxOutput,

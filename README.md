@@ -7,7 +7,10 @@ SenseNova provider for DeepSeek Harness with a **per-session key pool**.
 - One key per session, fixed for the session's whole lifetime.
 - 1,048,576-token context window and 384,000-token output ceiling per model.
 - Automatic round-robin for new sessions, or a manual default key chosen on
-  the Settings page. Key aliases are not shown as model-picker rows.
+  the Settings page, **kept as-is**.
+- **Per-key dedicated models**: by default every enabled key also gets its own
+  group of `<model>@<alias>` rows in the model picker. Picking one pins that
+  session to exactly that key (no round-robin). Adding a key adds a group.
 - Local OpenAI-compatible gateway with both Chat Completions and the **Codex
   Responses API**.
 
@@ -31,6 +34,35 @@ session C ── first request ──▶ k1   (round-robin)
   `settings.json` with their secret but are excluded from the pool and the
   round-robin. Renaming an alias keeps its secret (`originalAlias` is sent by
   the page); renaming no longer deletes the key.
+
+## Per-key dedicated models
+
+`perKeyModels` (default `true`) keeps the round-robin rows and, on top of them,
+advertises one group per enabled key:
+
+```
+deepseek-v4-flash          ← round-robin / the session's pinned key
+deepseek-v4-flash@nnk      ← pinned to key nnk, never round-robins
+deepseek-v4-flash@knn      ← pinned to key knn, never round-robins
+glm-5.2
+glm-5.2@nnk
+glm-5.2@knn
+...
+session B ── picks deepseek-v4-flash@knn ──▶ knn ── every later turn ──▶ knn
+```
+
+- The `@alias` suffix has always been accepted as a manual override
+  (`parseModelId`); this release simply shows it in the picker, one group per
+  key, so a specific key is selectable instead of hand-typed.
+- Selecting a `@alias` row **binds** the session to that alias: later turns of
+  that session keep using it even if the model is switched back to the plain
+  id. That is the same explicit-override rule as before.
+- Adding a key to `settings.json` (or via the Settings page) adds its whole
+  group; disabling a key removes the group from the picker (the pool excludes
+  disabled keys, so no `@disabled` row exists).
+- `perKeyModels: false` hides the groups again and leaves only the plain rows;
+  the aliases still work when typed by hand.
+- The toggle lives on the Settings page under **Keys**.
 
 ## Retry policy
 
@@ -190,16 +222,20 @@ model is chosen.
 
 Each advertised model uses a **1,048,576-token context window** and a
 **384,000-token output ceiling** (the 1M / 384K profile). The picker shows each
-model once; key aliases are **not** expanded into `model · key k1` rows:
+model once as the round-robin row, plus one `@alias` row per enabled key when
+`perKeyModels` is on (see *Per-key dedicated models* above):
 
 ```
 sensenova-pool / deepseek-v4-flash
+sensenova-pool / deepseek-v4-flash@nnk
+sensenova-pool / deepseek-v4-flash@knn
 ```
 
 In the web UI, click the model label at the **bottom-right of the composer**
-and pick the `SenseNova · Key Pool` group. The session store assigns exactly
-one key to the session; choose automatic round-robin or a manual default on the
-Settings page. Key aliases are not encoded into the picker model ids.
+and pick the `SenseNova · Key Pool` group. A plain row uses the session store
+(automatic round-robin or the manual default); a `@alias` row pins the session
+to that key. `perKeyModels: false` removes the `@alias` rows, which stay
+available by typing the id by hand.
 
 ## Codex interface
 
@@ -232,7 +268,7 @@ Gateway endpoints:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/sensenova-keypool/v1/models` | OpenAI model list (plain ids, no key aliases) |
+| `GET` | `/api/sensenova-keypool/v1/models` | OpenAI model list (plain ids plus one `@alias` group per enabled key when `perKeyModels` is on) |
 | `POST` | `/api/sensenova-keypool/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/api/sensenova-keypool/v1/responses` | OpenAI Responses / Codex |
 | `GET` | `/api/sensenova-keypool/v1/status` | masked key pool + session bindings |

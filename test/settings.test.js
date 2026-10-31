@@ -111,3 +111,16 @@ test('auto-continue values are normalized defensively', () => {
   assert.equal(settings.autoContinueRounds, 8)
   assert.equal(settings.autoContinuePrompt, '继续')
 })
+
+test('per-key model rows default on and follow the env override', () => {
+  const base = loadSettings({ path: '/nonexistent/settings.json', env: {} })
+  assert.equal(base.perKeyModels, true)
+
+  const file = tempSettings({ keys: [{ alias: 'k1', key: 'sk-one' }], perKeyModels: false })
+  assert.equal(loadSettings({ path: file, env: {} }).perKeyModels, false)
+
+  assert.equal(
+    loadSettings({ path: file, env: { SENSENOVA_PER_KEY_MODELS: 'true' } }).perKeyModels,
+    true,
+  )
+})
