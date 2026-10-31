@@ -101,6 +101,17 @@ test('offloaded images fall back to placeholder text', async () => {
   assert.match(body.messages[0].content, /offloaded/)
 })
 
+const imageAttachments = {
+  readImageRequest: async (ref, target, signal) => ({
+    attachment: ref,
+    mediaType: 'image/png',
+    data: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    bytes: 8,
+    width: 1,
+    height: 1,
+  }),
+}
+
 test('assistant tool call without text sends null content', async () => {
   const { body } = await toChatRequest({
     model: 'sensenova-6.8-flash-lite',
@@ -172,4 +183,107 @@ test('orphaned tool results are not replayed', async () => {
   assert.equal(valid.tool_calls.length, 1)
   assert.equal(valid.tool_calls[0].function.name, 'read_file')
   assert.equal(body.messages[2].tool_call_id, 'call_ok')
+})
+
+test('tool-result image is hoisted into a follow-up user image message', async () => {
+  const { body } = await toChatRequest(
+    {
+      model: 'sensenova-6.8-flash-lite',
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'call_shot', name: 'read_image', arguments: '{"path":"a.png"}' }],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'call_shot',
+          content: [
+            { type: 'text', text: 'image/png 1600x1024 px' },
+            { type: 'image', attachment: { attachmentId: 'sha256:shot' } },
+          ],
+        },
+      ],
+    },
+    { attachments: imageAttachments },
+  )
+
+  assert.deepEqual(body.messages.map(row => row.role), ['assistant', 'tool', 'user'])
+  const tool = body.messages[1]
+  assert.equal(tool.content, 'image/png 1600x1024 px')
+  assert.equal(tool.tool_call_id, 'call_shot')
+  const user = body.messages[2]
+  assert.equal(user.content[0].type, 'text')
+  assert.match(user.content[0].text, /Attached image\(s\) from tool result/)
+  assert.equal(user.content[1].type, 'image_url')
+  assert.match(user.content[1].image_url.url, /^data:image\/png;base64,/)
+})
+
+test('image-only tool result keeps a placeholder text on the tool row', async () => {
+  const { body } = await toChatRequest(
+    {
+      model: 'sensenova-6.8-flash-lite',
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'call_shot', name: 'read_image', arguments: '{}' }],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'call_shot',
+          content: [{ type: 'image', attachment: { attachmentId: 'sha256:shot' } }],
+        },
+      ],
+    },
+    { attachments: imageAttachments },
+  )
+  const tool = body.messages[1]
+  assert.equal(tool.content, '(see attached image)')
+  assert.equal(body.messages[2].role, 'user')
+  assert.equal(body.messages[2].content.filter(part => part.type === 'image_url').length, 1)
+})
+
+test('consecutive tool results share one hoisted image message', async () => {
+  const { body } = await toChatRequest(
+    {
+      model: 'sensenova-6.8-flash-lite',
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: 'call_a', name: 'read_image', arguments: '{}' },
+            { type: 'tool-call', id: 'call_b', name: 'read_image', arguments: '{}' },
+          ],
+        },
+        { role: 'tool', toolCallId: 'call_a', content: [{ type: 'image', attachment: { attachmentId: 'sha256:a' } }] },
+        { role: 'tool', toolCallId: 'call_b', content: [{ type: 'image', attachment: { attachmentId: 'sha256:b' } }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'I can see both.' }] },
+      ],
+    },
+    { attachments: imageAttachments },
+  )
+  assert.deepEqual(body.messages.map(row => row.role), ['assistant', 'tool', 'tool', 'user', 'assistant'])
+  const images = body.messages[3].content.filter(part => part.type === 'image_url')
+  assert.equal(images.length, 2)
+})
+
+test('offloaded tool-result image stays a placeholder with no hoisted message', async () => {
+  const { body } = await toChatRequest(
+    {
+      model: 'sensenova-6.8-flash-lite',
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'call_shot', name: 'read_image', arguments: '{}' }],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'call_shot',
+          content: [{ type: 'image', attachment: {}, offloaded: true }],
+        },
+      ],
+    },
+    { attachments: { readImageRequest: async () => { throw new Error('must not be called') } } },
+  )
+  assert.deepEqual(body.messages.map(row => row.role), ['assistant', 'tool'])
+  assert.match(body.messages[1].content, /offloaded/)
 })

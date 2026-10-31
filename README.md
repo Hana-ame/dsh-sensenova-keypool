@@ -225,6 +225,25 @@ unbound — no session id is passed, so they do not pin a session to a key or
 write anything to `state.json`. A **Test key** selector next to the table sends
 `<model>@<alias>` instead, so a single key in the pool can be probed directly.
 
+## Image input
+
+A row's **image** checkbox in *Models & context* makes the route accept images.
+Two request sites are supported:
+
+- **User attachments** (pasted/uploaded images) become OpenAI `image_url` parts
+  with a normalized data URL from the durable attachment service.
+- **Tool-result images** (`read_image`, a CUA screenshot, a browser screenshot)
+  become a follow-up `user` message — `Attached image(s) from tool result:` plus
+  one `image_url` part per image — immediately after the contiguous `tool` rows.
+  Chat Completions has no image content on the `tool` role, so keeping the image
+  on the tool row would silently drop it and leave an image-capable model blind
+  to every screenshot. Offloaded images stay a text placeholder; tool results
+  with only images keep `(see attached image)` as their text.
+
+The DSH runtime itself strips images to text for routes whose resolved
+`inputModalities` do not include `image`, so a text-only row never reaches the
+attachment service.
+
 ## Model selection
 
 Each advertised model uses a **1,048,576-token context window** and a

@@ -10,6 +10,14 @@
  * runtime strips images to placeholder text for text-only routes, so this
  * projection only runs for models that declare image input.
  *
+ * Images can appear on user messages (a pasted attachment) or on **tool
+ * results** (`read_image`, a CUA screenshot). OpenAI Chat Completions has no
+ * image content on the `tool` role, so tool-result images are hoisted into a
+ * follow-up `user` message ("Attached image(s) from tool result:") after the
+ * tool rows. Dropping them used to make an image-capable route silently blind:
+ * the model only saw the old "[image omitted: this route is text-only]" text
+ * even though the plugin advertised `inputModalities: ['text', 'image']`.
+ *
  * @module src/messages
  */
 
@@ -30,6 +38,51 @@ function textOf(content) {
     else if (block.type === 'file') parts.push('[file omitted: read it through the file tool]')
   }
   return parts.join('\n')
+}
+
+/**
+ * Text projection of one tool result.
+ *
+ * Tool-result images are handled by `imagesOf()` (hoisted into a follow-up
+ * user message), so they are skipped here; an offloaded image keeps a visible
+ * placeholder because it can no longer be requested at all.
+ */
+function toolTextOf(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    else if (block.type === 'image' && block.offloaded === true) parts.push('[image omitted: offloaded]')
+    else if (block.type === 'file') parts.push('[file omitted: read it through the file tool]')
+  }
+  return parts.join('\n')
+}
+
+/**
+ * Resolve every image block of one content list into OpenAI `image_url` parts
+ * and text placeholders for images the wire cannot carry.
+ *
+ * @param {unknown} content
+ * @param {object} [deps]
+ * @returns {Promise<{images: object[], placeholders: string[]}>}
+ */
+async function imagesOf(content, deps) {
+  const images = []
+  const placeholders = []
+  if (!Array.isArray(content)) return { images, placeholders }
+  for (const block of content) {
+    if (block === null || typeof block !== 'object' || block.type !== 'image') continue
+    if (block.offloaded === true) {
+      placeholders.push('[image omitted: offloaded]')
+      continue
+    }
+    const resolved = await imageUrlOf(block, deps)
+    if (resolved.url !== undefined) images.push({ type: 'image_url', image_url: { url: resolved.url } })
+    else placeholders.push(resolved.placeholder ?? '[image omitted]')
+  }
+  return { images, placeholders }
 }
 
 function reasoningOf(content) {
@@ -152,10 +205,25 @@ export async function toChatRequest(options, imageDeps = {}) {
   // `role: 'tool'` result whose id is not in this set is orphaned (its tool
   // call was dropped, e.g. an empty-name call) and must not be replayed.
   let liveToolCallIds = new Set()
+  // Images found on tool results. Chat Completions cannot attach an image to
+  // the `tool` role, so they are hoisted into one user message after the
+  // contiguous tool-result block. Without this, a screenshot from a CUA tool
+  // or `read_image` is invisible to an image-capable model.
+  let pendingToolImages = []
+  const flushToolImages = () => {
+    if (pendingToolImages.length === 0) return
+    const images = pendingToolImages
+    pendingToolImages = []
+    messages.push({
+      role: 'user',
+      content: [{ type: 'text', text: 'Attached image(s) from tool result:' }, ...images],
+    })
+  }
 
   for (const message of options?.messages ?? []) {
     if (message === null || typeof message !== 'object') continue
     const role = String(message.role ?? '')
+    if (role !== 'tool') flushToolImages()
 
     if (role === 'system' || role === 'developer') {
       const text = textOf(message.content)
@@ -166,11 +234,15 @@ export async function toChatRequest(options, imageDeps = {}) {
     if (role === 'tool') {
       const toolCallId = toolCallIdOf(message)
       if (!liveToolCallIds.has(toolCallId)) continue
+      const text = toolTextOf(message.content)
+      const { images, placeholders } = await imagesOf(message.content, imageDeps)
+      const content = [text, ...placeholders].filter(part => part !== '').join('\n')
       messages.push({
         role: 'tool',
         tool_call_id: toolCallId,
-        content: textOf(message.content),
+        content: content !== '' || images.length === 0 ? content : '(see attached image)',
       })
+      if (images.length > 0) pendingToolImages.push(...images)
       continue
     }
 
@@ -190,6 +262,7 @@ export async function toChatRequest(options, imageDeps = {}) {
     const content = await userContentOf(message.content, imageDeps)
     messages.push({ role: role === 'user' ? 'user' : 'user', content })
   }
+  flushToolImages()
 
   if (systemParts.length > 0) messages.unshift({ role: 'system', content: systemParts.join('\n\n') })
 
