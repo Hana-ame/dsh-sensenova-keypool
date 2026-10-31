@@ -306,6 +306,15 @@ window.__ModuleLoader__.load({
       return `k${rows.length + 1}`
     }
 
+    // Stable identity for one model row. React keys must NOT derive from the
+    // editable `model.id`: every keystroke in the id input would produce a new
+    // key, remount the row and drop the caret (one click per character).
+    let modelSeq = 0
+    function nextModelUid() {
+      modelSeq += 1
+      return `model-${modelSeq}`
+    }
+
     function normalizeRows(config) {
       return (config?.keys ?? []).map(key => ({
         alias: String(key.alias ?? ''),
@@ -344,6 +353,7 @@ window.__ModuleLoader__.load({
         setDefaultKey(String(payload.defaultKey ?? payload.keys?.[0]?.alias ?? 'k1'))
         setDefaultModel(String(payload.defaultModel ?? payload.models?.[0]?.id ?? ''))
         setModels((Array.isArray(payload.models) ? payload.models : []).map(model => ({
+          uid: nextModelUid(),
           id: String(model.id ?? ''),
           name: String(model.name ?? ''),
           description: String(model.description ?? ''),
@@ -402,6 +412,7 @@ window.__ModuleLoader__.load({
 
       const addModel = () => {
         setModels(current => [...current, {
+          uid: nextModelUid(),
           id: '',
           name: '',
           description: '',
@@ -594,7 +605,7 @@ window.__ModuleLoader__.load({
           ),
           models.length === 0
             ? h('p', { style: styles.hint }, t('modelEmpty'))
-            : models.map((model, index) => h('div', { key: `${model.id || 'model'}-${index}`, style: styles.modelItem },
+            : models.map((model, index) => h('div', { key: model.uid ?? `model-${index}`, style: styles.modelItem },
                 h('div', { style: styles.modelRow },
                   h('label', { style: styles.modelField },
                     h('span', null, t('modelId')),
