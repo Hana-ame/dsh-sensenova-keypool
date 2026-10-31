@@ -244,6 +244,13 @@ The DSH runtime itself strips images to text for routes whose resolved
 `inputModalities` do not include `image`, so a text-only row never reaches the
 attachment service.
 
+The adapter also implements `imageRequestPricing` (synchronous, no file I/O) so
+the token meter and `spill-policy` can bound image results instead of using the
+structural-JSON heuristic. SenseNova publishes no per-image token accounting, so
+visual tokens are a documented estimate (96-384 per image, calibrated against
+measured upstream `prompt_tokens`); provider `usage` remains authoritative for
+completed requests.
+
 ## Model selection
 
 Each advertised model uses a **1,048,576-token context window** and a
