@@ -18,7 +18,6 @@
  */
 
 import {
-  MODELS,
   ROUTE,
   ROUTE_LABEL,
   catalogRows,
@@ -32,38 +31,6 @@ import { jsonToChunks, mergeUsage, parseSseStream } from './stream.js'
 import { validateSettings } from './settings.js'
 
 const sleepDefault = ms => new Promise(resolve => setTimeout(resolve, ms))
-
-/**
- * Rough SenseNova vision-token estimate for one request image.
- *
- * The OpenAI-compatible endpoint publishes no per-image accounting. These
- * bounds come from measured `prompt_tokens` deltas against
- * token.sensenova.cn on 2026-11-01 across 12 image sizes (10k-2.5M px):
- * ~98-115 tokens for small images, rising roughly linearly, then plateauing
- * around 346-366 tokens for screenshot-sized images (>= ~0.5M px). The value
- * only shapes token-meter estimates and the spill-policy bound; actual
- * provider usage stays the authoritative anchor after a request.
- */
-const IMAGE_TOKEN_FLOOR = 96
-const IMAGE_PIXELS_PER_TOKEN = 2048
-const IMAGE_TOKEN_CAP = 384
-
-function estimateImageVisualTokens(ref) {
-  const width = Number.isFinite(ref?.width) && ref.width > 0 ? ref.width : 1024
-  const height = Number.isFinite(ref?.height) && ref.height > 0 ? ref.height : 768
-  return Math.min(IMAGE_TOKEN_CAP, IMAGE_TOKEN_FLOOR + Math.round((width * height) / IMAGE_PIXELS_PER_TOKEN))
-}
-
-/**
- * Text-only substitution for one image occurrence. Mirrors the harness's
- * `textOnlyImageText` exactly; the plugin cannot import `@deepseek-ai/dsh-llm`
- * from its own directory (that peer dependency resolves only inside a loaded
- * profile), so keep this string in sync with `dsh-llm` when it changes.
- */
-function textOnlyImageText(ref) {
-  const attachmentId = String(ref?.attachmentId ?? '')
-  return `[image omitted because this model accepts text only; attachment sha256:${attachmentId.slice(7, 15)}]`
-}
 
 function failureOf(error) {
   if (error instanceof UpstreamError) {
@@ -92,16 +59,10 @@ export class SensenovaKeyPoolAdapter {
     this.pool = null
     this.store = null
     this.fingerprint = ''
-    // Model metadata last loaded by `_ensure()`. `imageRequestPricing` is a
-    // synchronous, I/O-free contract call, so it must price from this snapshot
-    // instead of re-reading settings.json; the built-in catalog is the
-    // fallback before the adapter has served a model query.
-    this.modelsSnapshot = MODELS
   }
 
   _ensure() {
     const settings = this.deps.settingsSource.current()
-    this.modelsSnapshot = settings.models
     const problems = validateSettings(settings)
     if (problems.length > 0) this.deps.warn?.(`configuration: ${problems.join('; ')}`)
     const fingerprint = JSON.stringify({
@@ -147,40 +108,33 @@ export class SensenovaKeyPoolAdapter {
   }
 
   /**
-   * Provider-side image pricing for the token meter and the spill-policy
-   * request bound.
-   *
-   * The contract requires a synchronous, side-effect-free answer: consumers
-   * call it per measurement, so this must never stat/read `settings.json`.
-   * It prices from `this.modelsSnapshot`, which `_ensure()` refreshes whenever
-   * the adapter serves a catalog/model/stream call.
-   *
-   * An occurrence resolves to what this route's wire actually carries:
-   *   - retained image: an `image_url` data URL with no per-image sentence, so
-   *     the added text is empty and only the estimated visual tokens count;
-   *   - offloaded image: the adapter's placeholder text, zero visual tokens;
-   *   - text-only/unlisted model: the harness's own text substitution.
+   * Provider-side image pricing. `sensenova-6.8-flash-lite` declares image
+   * input (`inputModalities: ['text','image']`); the upstream chat-route 404
+   * observed on 2026-10-27 was a server fault, not a capability gap, so image
+   * requests are priced rather than projected to text. Text-only models keep
+   * the deterministic text substitution so dsh still has a calculator.
    */
   imageRequestPricing(provider, model) {
-    const models = this.modelsSnapshot ?? MODELS
-    const info = resolveModelInfo(provider ?? ROUTE, model, models)
+    const { settings } = this._ensure()
+    const info = resolveModelInfo(provider ?? ROUTE, model, settings.models)
     const supportsImage = info.inputModalities.includes('image')
     if (!supportsImage) {
-      return {
-        priceImages: images => images.map(({ attachment: ref }) => ({
-          visualTokens: 0,
-          text: textOnlyImageText(ref),
-        })),
+      return { priceImages: (images) => images.map(({ attachment: ref }) => ({
+        visualTokens: 0,
+        text: `[image omitted: model does not support images; ${ref.mediaType ?? 'image'}]`,
+      })) }
+    }
+    return { priceImages: (images) => images.map(({ attachment: ref, offloaded }) => {
+      if (offloaded === true) {
+        return { visualTokens: 0, text: `[image offloaded: ${ref.attachmentId}]` }
       }
-    }
-    return {
-      priceImages: images => images.map(({ attachment: ref, offloaded }) => {
-        if (offloaded === true) {
-          return { visualTokens: 0, text: '[image omitted: offloaded]' }
-        }
-        return { visualTokens: estimateImageVisualTokens(ref), text: '' }
-      }),
-    }
+      const width = ref.width ?? 1024
+      const height = ref.height ?? 768
+      // OpenAI-compatible vision accounting heuristic: ~1 token per 750 px².
+      // Not an upstream-published constant; only affects token-meter math.
+      const visualTokens = Math.max(1, Math.round((width * height) / 750))
+      return { visualTokens, text: `[Image: ${ref.mediaType}; ${width}x${height}]` }
+    }) }
   }
 
   async listModels(provider) {

@@ -99,7 +99,7 @@ export const DEFAULTS = Object.freeze({
     Object.freeze({
       id: 'sensenova-6.8-flash-lite',
       name: 'SenseNova 6.8 Flash Lite',
-      description: 'SenseNova 6.8 Flash Lite, image-capable',
+      description: 'SenseNova 6.8 Flash Lite, image-capable (chat route 404 as of 2026-10-27)',
       contextWindow: 1_048_576,
       maxOutput: 384_000,
       reasoning: true,

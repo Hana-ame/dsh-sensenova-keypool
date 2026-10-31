@@ -8,11 +8,10 @@
  *
  * Context windows and output ceilings follow the profile-wide preference
  * (1M context / 384K output, kept consistent with the other key-pool routes).
- * `sensenova-6.8-flash-lite` is the multimodal model: its OpenAI-compatible
- * chat route accepts `image_url` parts (verified 2026-11-01, after the
- * 2026-10-27 `404 model route not found` incident cleared). The endpoint
- * publishes no per-image token accounting, so `imageRequestPricing` estimates
- * visual tokens instead of quoting an upstream constant.
+ * `sensenova-6.8-flash-lite` is the only upstream model that declares image
+ * input; its chat route answered `404 model route not found` on 2026-10-27
+ * (still listed in /models), so image requests will fail until upstream
+ * restores that route. `sensenova-6.7-flash-lite` is not in the upstream list.
  *
  * The `@k<N>` suffix is the manual key selector:
  *   sensenova-6.8-flash-lite@k2 → model sensenova-6.8-flash-lite, key k2
@@ -94,7 +93,7 @@ export const MODELS = Object.freeze([
   Object.freeze({
     id: 'sensenova-6.8-flash-lite',
     name: 'SenseNova 6.8 Flash Lite',
-    description: 'SenseNova 6.8 Flash Lite, image-capable',
+    description: 'SenseNova 6.8 Flash Lite, image-capable (chat route 404 as of 2026-10-27)',
     contextWindow: 1_048_576,
     maxOutput: 384_000,
     reasoning: true,
