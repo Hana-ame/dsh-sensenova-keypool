@@ -1,6 +1,6 @@
 {
   "name": "dsh-sensenova-keypool",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "SenseNova provider with a multi-key pool and a Settings page for entering keys. Each DSH session is pinned to one key; automatic round-robin or manual selection is preserved, and every key additionally gets its own dedicated model group (@alias, never round-robins). Also exposes an OpenAI-compatible local gateway with Chat Completions and Codex Responses endpoints.",

@@ -198,7 +198,7 @@ window.__ModuleLoader__.load({
         display: 'grid',
         gridTemplateColumns: '110px minmax(150px, 1fr) auto auto',
         gap: '8px',
-        alignItems: 'center',
+        alignItems: 'start',
       },
       input: {
         width: '100%',
@@ -273,6 +273,19 @@ window.__ModuleLoader__.load({
         color: 'var(--dsw-alias-label-secondary, #a8a8a8)',
       },
       check: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #a8a8a8)' },
+      // Fixed-height label row for control-only columns (checkboxes): keeps
+      // them the same total height as a label+input `modelField` in the row.
+      labelSpacer: { display: 'block', height: '14px', lineHeight: '14px', fontSize: '11px' },
+      // Same box height as `input`, so a checkbox control bottom-aligns with a
+      // number/text input in the same grid row instead of hanging 36px lower.
+      checkTall: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '7px',
+        minHeight: '38px',
+        fontSize: '12px',
+        color: 'var(--dsw-alias-label-secondary, #a8a8a8)',
+      },
       masked: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary, #888)' },
       select: {
         width: '100%',
@@ -624,21 +637,27 @@ window.__ModuleLoader__.load({
                       onChange: event => updateModel(index, { maxOutput: Number(event.target.value) }),
                     }),
                   ),
-                  h('label', { style: styles.check },
-                    h('input', {
-                      type: 'checkbox',
-                      checked: model.inputModalities.includes('text'),
-                      onChange: () => toggleModelModality(index, 'text'),
-                    }),
-                    t('modalityText'),
+                  h('label', { style: styles.modelField },
+                    h('span', { style: styles.labelSpacer }, '\u00a0'),
+                    h('span', { style: styles.checkTall },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: model.inputModalities.includes('text'),
+                        onChange: () => toggleModelModality(index, 'text'),
+                      }),
+                      t('modalityText'),
+                    ),
                   ),
-                  h('label', { style: styles.check },
-                    h('input', {
-                      type: 'checkbox',
-                      checked: model.inputModalities.includes('image'),
-                      onChange: () => toggleModelModality(index, 'image'),
-                    }),
-                    t('modalityImage'),
+                  h('label', { style: styles.modelField },
+                    h('span', { style: styles.labelSpacer }, '\u00a0'),
+                    h('span', { style: styles.checkTall },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: model.inputModalities.includes('image'),
+                        onChange: () => toggleModelModality(index, 'image'),
+                      }),
+                      t('modalityImage'),
+                    ),
                   ),
                 ),
               )),
