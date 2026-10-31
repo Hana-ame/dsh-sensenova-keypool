@@ -44,33 +44,6 @@ function failureOf(error) {
   return { code: 'TRANSPORT', message: String(error?.message ?? error) }
 }
 
-/**
- * Classify an upstream failure into a probe-based quota state. The provider's
- * 429 vocabulary (see stream.js) is the only signal an API key can reach, so
- * the two buckets are told apart by the error body:
- *
- *   - `token plan entitlement exhausted` → hard quota wall (`quota_exhausted`);
- *   - `rps / rpm / tpm exhausted`        → transient bucket (`rate_limited`).
- *
- * @param {unknown} error
- * @returns {'healthy'|'rate_limited'|'quota_exhausted'|'invalid_credential'|'error'}
- */
-export function classifyQuotaError(error) {
-  if (error instanceof UpstreamError) {
-    if (error.status === 401 || error.status === 403) return 'invalid_credential'
-    if (error.status === 429) {
-      const text = `${error.message} ${error.body ?? ''}`.toLowerCase()
-      if (text.includes('token plan entitlement exhausted')) return 'quota_exhausted'
-      if (/rps|rpm|tpm|rate|quota|exhausted/.test(text)) return 'rate_limited'
-      return 'rate_limited'
-    }
-    if (error.status >= 500) return 'error'
-    if (error.status === 408 || error.status === 504) return 'error'
-    return 'error'
-  }
-  return 'error'
-}
-
 export class SensenovaKeyPoolAdapter {
   /**
    * @param {object} deps
@@ -187,91 +160,8 @@ export class SensenovaKeyPoolAdapter {
       mode: settings.mode,
       defaultModel: settings.defaultModel,
       models: settings.models.map(model => model.id),
-      // Last probe-based quota snapshot, without re-probing. `null` until the
-      // first `quota()` call (settings page auto-fetches on load).
-      quota: this._quotaCache?.result ?? null,
       ...store.snapshot(),
     }
-  }
-
-  /**
-   * Probe-based quota snapshot. SenseNova's OpenAI-compatible gateway
-   * (`token.sensenova.cn`) exposes NO quota endpoint — only `/v1/models` and
-   * `/v1/chat/completions` exist there, and the console endpoints that carry
-   * real numbers (`/lite/console/v1/tokenplan/pool-usage`) are OAuth-session
-   * gated. So "quota" is inferred from a minimal chat request per key and the
-   * 429 vocabulary the provider returns:
-   *
-   *   - 200  → `healthy`            (entitlement present, not rate-throttled)
-   *   - 429  `token plan entitlement exhausted` → `quota_exhausted`
-   *          (hard wall: the plan's token budget is spent)
-   *   - 429  `rps / rpm / tpm exhausted`        → `rate_limited`
-   *          (transient bucket; key works again shortly)
-   *   - 401/403                        → `invalid_credential`
-   *   - anything else                  → `error`
-   *
-   * The probe is non-streaming and capped at `maxTokens` output tokens so it
-   * costs a few tokens per key. Results are cached for `ttlMs` (60 s by
-   * default) so repeated settings-page renders do not hammer the shared
-   * account bucket; `force: true` re-probes immediately.
-   *
-   * @param {{ model?: string, maxTokens?: number, timeoutMs?: number, ttlMs?: number, force?: boolean }} [options]
-   * @returns {Promise<object>} `{ ok, at, model, cacheHit, entries: [{ alias, masked, state, httpStatus?, latencyMs, message? }] }`
-   */
-  async quota({ model, maxTokens = 2, timeoutMs = 15_000, ttlMs = 60_000, force = false } = {}) {
-    const now = Date.now()
-    if (!force && this._quotaCache !== undefined && now - this._quotaCache.at < Math.max(1_000, Number(ttlMs) || 60_000)) {
-      return { ...this._quotaCache.result, cacheHit: true }
-    }
-    const { settings, pool } = this._ensure()
-    const probeModel = String(model ?? settings.defaultModel ?? '').trim() || 'deepseek-flash'
-    const entries = []
-    // Probe keys sequentially with a short stagger: every key of the same
-    // account shares the provider's rate bucket, so a simultaneous burst can
-    // trip rps and mislabel a merely-throttled key as exhausted.
-    for (let index = 0; index < pool.entries.length; index += 1) {
-      const entry = pool.entries[index]
-      if (index > 0) await new Promise(resolve => setTimeout(resolve, 150))
-      const started = Date.now()
-      const row = { alias: entry.alias, masked: entry.masked, state: 'error', latencyMs: 0 }
-      try {
-        const response = await postChat({
-          baseURL: settings.baseURL,
-          chatPath: settings.chatPath,
-          key: entry.key,
-          body: {
-            model: probeModel,
-            messages: [{ role: 'user', content: 'hi' }],
-            max_tokens: Math.max(1, Number(maxTokens) || 2),
-            stream: false,
-          },
-          timeoutMs,
-          fetchImpl: this.deps.fetchImpl,
-        })
-        row.state = 'healthy'
-        row.httpStatus = Number(response?.status ?? 200)
-        // Drain the body so the connection is reused; the JSON answer is not
-        // needed to classify, and `readJson` would throw on a stream that a
-        // provider closes early.
-        try { await response.text() } catch { /* non-fatal */ }
-      } catch (error) {
-        row.state = classifyQuotaError(error)
-        row.httpStatus = error instanceof UpstreamError ? error.status : undefined
-        row.message = String(error?.message ?? error).slice(0, 300)
-      } finally {
-        row.latencyMs = Date.now() - started
-        entries.push(row)
-      }
-    }
-    const result = {
-      ok: true,
-      at: new Date(now).toISOString(),
-      model: probeModel,
-      cacheHit: false,
-      entries,
-    }
-    this._quotaCache = { at: now, result }
-    return result
   }
 
   /**

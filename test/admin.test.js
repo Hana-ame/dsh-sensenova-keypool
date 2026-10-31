@@ -287,41 +287,6 @@ test('per-key model rows: exposed on GET, saved on POST, kept when omitted', asy
   assert.equal(on.body.perKeyModels, true)
 })
 
-test('POST /quota requires JSON and forwards force, never leaking a raw key', async () => {
-  let seen = null
-  const file = tempFile({ baseURL: 'https://example.test/v1', mode: 'auto', defaultKey: 'k1', keys: [{ alias: 'k1', key: 'sk-secret-one' }] })
-  const admin = createAdmin({
-    settingsPath: file,
-    adapter: {
-      status: () => ({ route: 'sensenova-pool', poolSize: 1 }),
-      quota: async options => {
-        seen = options
-        return {
-          ok: true,
-          at: '2026-10-31T00:00:00.000Z',
-          model: 'deepseek-flash',
-          cacheHit: false,
-          entries: [{ alias: 'k1', masked: 'sk-s…-one', state: 'healthy', httpStatus: 200, latencyMs: 12 }],
-        }
-      },
-    },
-  })
-  const bad = await invoke(admin, { method: 'POST', url: '/api/sensenova-keypool/admin/quota', headers: { 'content-type': 'text/plain' }, body: { force: true } })
-  assert.equal(bad.status, 400)
-  assert.equal(bad.body.error.code, 'BAD_REQUEST')
-
-  const response = await invoke(admin, {
-    method: 'POST',
-    url: '/api/sensenova-keypool/admin/quota',
-    headers: { 'content-type': 'application/json' },
-    body: { force: true },
-  })
-  assert.equal(response.status, 200)
-  assert.deepEqual(seen, { force: true })
-  assert.equal(response.body.entries[0].state, 'healthy')
-  assert.equal(JSON.stringify(response.body).includes('sk-secret-one'), false)
-})
-
 test('POST /test runs a one-shot hi through the adapter', async () => {
   const adapter = { testModel: async ({ model }) => ({ ok: true, model, key: 'k1', latencyMs: 12, text: '你好' }) }
   const handler = createAdmin({ settingsPath: tempFile({ keys: [], models: [] }), adapter })
