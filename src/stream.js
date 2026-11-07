@@ -19,22 +19,32 @@ import { UpstreamError } from './upstream.js'
 
 export function mapUsage(usage) {
   if (usage === null || typeof usage !== 'object') return undefined
-  const input = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0)
+  const rawInput = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0)
   const output = Number(usage.completion_tokens ?? usage.output_tokens ?? 0)
   const total = Number(usage.total_tokens ?? 0)
-  const mapped = {
-    inputTokens: Number.isFinite(input) ? input : 0,
-    outputTokens: Number.isFinite(output) ? output : 0,
-  }
-  if (Number.isFinite(total) && total > 0) mapped.totalTokens = total
   const cacheRead = Number(
     usage.prompt_tokens_details?.cached_tokens ??
       usage.input_tokens_details?.cached_tokens ??
       usage.cache_read_input_tokens ??
       0,
   )
-  if (Number.isFinite(cacheRead) && cacheRead > 0) mapped.cacheReadTokens = cacheRead
   const cacheWrite = Number(usage.cache_creation_input_tokens ?? 0)
+  // DSH `TokenUsage` 契约要求计数 disjoint：inputTokens 只算未缓存输入，
+  // 缓存命中/写入分别单列（billed input = 三者之和）。OpenAI 风格
+  // `prompt_tokens` 已包含缓存命中，必须减掉；Anthropic 风格 `input_tokens`
+  // 本身已是未缓存值，不能减。此前直接把 prompt_tokens 填进 inputTokens
+  // 同时又填 cacheReadTokens，导致 token-meter 的压力把缓存算两遍
+  // （真实 261,619 的 prompt 被显示成 521,971），并让 nearContextLimit 误判。
+  const openAiShape = usage.prompt_tokens !== undefined
+  const input = openAiShape
+    ? Math.max(0, rawInput - (Number.isFinite(cacheRead) ? cacheRead : 0) - (Number.isFinite(cacheWrite) ? cacheWrite : 0))
+    : rawInput
+  const mapped = {
+    inputTokens: Number.isFinite(input) ? input : 0,
+    outputTokens: Number.isFinite(output) ? output : 0,
+  }
+  if (Number.isFinite(total) && total > 0) mapped.totalTokens = total
+  if (Number.isFinite(cacheRead) && cacheRead > 0) mapped.cacheReadTokens = cacheRead
   if (Number.isFinite(cacheWrite) && cacheWrite > 0) mapped.cacheWriteTokens = cacheWrite
   const reasoning = Number(
     usage.completion_tokens_details?.reasoning_tokens ??

@@ -100,6 +100,26 @@ test('an explicit @alias pins that session', async () => {
   assert.equal(JSON.parse(calls[0].init.body).model, 'sensenova-6.8-flash-lite')
 })
 
+test('a rotation row rotates the key on every request, cycling the pool', async () => {
+  const { adapter, calls } = adapterWith(() => sseResponse())
+  const base = { provider: 'sensenova-pool', messages: [{ role: 'user', content: 'hi' }] }
+
+  await collect(adapter.stream({ ...base, model: 'sensenova-6.8-flash-lite@轮换', sessionId: 'rotating' }))
+  await collect(adapter.stream({ ...base, model: 'sensenova-6.8-flash-lite@轮换', sessionId: 'rotating' }))
+  await collect(adapter.stream({ ...base, model: 'sensenova-6.8-flash-lite@轮换', sessionId: 'rotating' }))
+  await collect(adapter.stream({ ...base, model: 'sensenova-6.8-flash-lite@轮换', sessionId: 'other' }))
+
+  // k1 → k2 → k1 → k2: every request the next key, wrap around, sessions irrelevant.
+  assert.equal(calls[0].init.headers.authorization, 'Bearer sk-first-secret')
+  assert.equal(calls[1].init.headers.authorization, 'Bearer sk-second-secret')
+  assert.equal(calls[2].init.headers.authorization, 'Bearer sk-first-secret')
+  assert.equal(calls[3].init.headers.authorization, 'Bearer sk-second-secret')
+  // The upstream model id must be the bare id — the alias never reaches SenseNova.
+  assert.equal(JSON.parse(calls[0].init.body).model, 'sensenova-6.8-flash-lite')
+  // No session binding was created by the rotation rows.
+  assert.equal(adapter.status().sessions.some(row => row.alias === '轮换'), false)
+})
+
 test('429 does not switch keys and surfaces the failure', async () => {
   const { adapter, calls } = adapterWith(() => new Response('{"error":{"message":"slow down","type":"rate_limit"}}', {
     status: 429,
@@ -617,10 +637,14 @@ test('listModels advertises one plain row plus one dedicated group per enabled k
   const rows = await adapter.listModels('sensenova-pool')
   assert.deepEqual(rows.map(row => row.id), [
     'sensenova-6.8-flash-lite',
+    'sensenova-6.8-flash-lite@轮换',
     'sensenova-6.8-flash-lite@k1',
     'sensenova-6.8-flash-lite@k2',
   ])
-  const pinned = rows[1]
+  const rotation = rows[1]
+  assert.equal(rotation.name, 'Lite · 轮换')
+  assert.equal(rotation.description.endsWith('[每次请求换下一个 key]'), true)
+  const pinned = rows[2]
   assert.equal(pinned.name, 'Lite · k1')
   assert.equal(pinned.description.endsWith('[key k1]'), true)
 })
@@ -633,13 +657,20 @@ test('a disabled key contributes no dedicated model rows', async () => {
     ],
   })
   const rows = await adapter.listModels('sensenova-pool')
-  assert.deepEqual(rows.map(row => row.id), ['sensenova-6.8-flash-lite', 'sensenova-6.8-flash-lite@k1'])
+  assert.deepEqual(rows.map(row => row.id), [
+    'sensenova-6.8-flash-lite',
+    'sensenova-6.8-flash-lite@轮换',
+    'sensenova-6.8-flash-lite@k1',
+  ])
 })
 
 test('perKeyModels:false keeps listModels to the plain round-robin rows', async () => {
   const { adapter } = adapterWith(() => sseResponse(), { perKeyModels: false })
   const rows = await adapter.listModels('sensenova-pool')
-  assert.deepEqual(rows.map(row => row.id), ['sensenova-6.8-flash-lite'])
+  assert.deepEqual(rows.map(row => row.id), [
+    'sensenova-6.8-flash-lite',
+    'sensenova-6.8-flash-lite@轮换',
+  ])
 })
 
 test('testModel sends a single hi through the pool key and reports latency', async () => {
@@ -747,4 +778,49 @@ test('imageRequestPricing marks offloaded occurrences as placeholder text', asyn
   assert.deepEqual(prices[0], { visualTokens: 0, text: '[image omitted: offloaded]' })
   assert.equal(prices[1].text, '')
   assert.ok(prices[1].visualTokens > 0)
+})
+
+test('a route that rejects image input retries once as text instead of failing', async () => {
+  // Verified live: glm-5.2 declares `image` in settings/upstream metadata but
+  // its chat route rejects image_url with HTTP 400 "inference request is
+  // invalid". The adapter must degrade that one request to text and keep the
+  // turn alive, rather than surfacing a terminal BAD_REQUEST.
+  const { adapter, calls } = adapterWith((url, init, callIndex) => {
+    if (callIndex === 1) {
+      return new Response(
+        '{"error":{"message":"inference request is invalid","type":"invalid_request_error","code":"invalid_parameter_error"}}',
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return sseResponse('text only answer')
+  }, {}, {
+    resolveAttachments: () => ({
+      readImageRequest: async () => ({
+        mediaType: 'image/jpeg',
+        data: new Uint8Array([1, 2, 3]),
+        bytes: 3,
+        width: 1,
+        height: 1,
+      }),
+    }),
+  })
+
+  const chunks = await collect(adapter.stream({
+    provider: 'sensenova-pool',
+    model: 'sensenova-6.8-flash-lite',
+    messages: [{
+      role: 'user',
+      content: [{ type: 'text', text: 'what is this' }, { type: 'image', attachment: { attachmentId: 'img-1' } }],
+    }],
+    sessionId: 'image-reject-session',
+  }))
+
+  assert.equal(calls.length, 2)
+  const first = JSON.parse(calls[0].init.body)
+  assert.equal(first.messages[0].content[1].type, 'image_url')
+  const retried = JSON.parse(calls[1].init.body)
+  assert.equal(JSON.stringify(retried).includes('image_url'), false)
+  assert.equal(retried.messages[0].content.some(part => part.type === 'image_url'), false)
+  assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'text only answer')
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
 })

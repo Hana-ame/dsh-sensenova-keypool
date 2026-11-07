@@ -143,3 +143,39 @@ test('non-streaming chat returns the upstream JSON object', async () => {
     await close(upstream)
   }
 })
+
+test('chat completions normalizes reasoning_effort before forwarding', async () => {
+  await withGateway(async ({ base, seen }) => {
+    const response = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'sensenova-6.8-flash-lite',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        reasoning_effort: 'on',
+      }),
+    })
+    assert.equal(response.status, 200)
+    await response.text()
+    assert.equal(seen[0].body.reasoning_effort, 'high')
+  })
+})
+
+test('chat completions drops an unrecognized reasoning_effort', async () => {
+  await withGateway(async ({ base, seen }) => {
+    const response = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'sensenova-6.8-flash-lite',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        reasoning_effort: 'garbage',
+      }),
+    })
+    assert.equal(response.status, 200)
+    await response.text()
+    assert.equal('reasoning_effort' in seen[0].body, false)
+  })
+})

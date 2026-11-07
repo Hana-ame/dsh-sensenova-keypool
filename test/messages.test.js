@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toChatRequest } from '../src/messages.js'
+import { normalizeReasoningEffort, toChatRequest } from '../src/messages.js'
 
 test('projects system, user, reasoning, tool calls and tool results', async () => {
   const { body, modelId, alias } = await toChatRequest({
@@ -51,7 +51,10 @@ test('projects system, user, reasoning, tool calls and tool results', async () =
   assert.match(body.messages[1].content, /hello/)
   assert.match(body.messages[1].content, /image omitted/)
   assert.equal(body.messages[2].role, 'assistant')
-  assert.equal(body.messages[2].reasoning_content, 'think')
+  // reasoning_content is a response-only field: SenseNova rejects requests
+  // that replay it with HTTP 400 "inference request is invalid", so assistant
+  // reasoning is dropped from the projection (verified live, see adapter.js).
+  assert.equal(body.messages[2].reasoning_content, undefined)
   assert.equal(body.messages[2].content, 'calling')
   assert.equal(body.messages[2].tool_calls[0].id, 'call_1')
   assert.equal(body.messages[3].role, 'tool')
@@ -286,4 +289,41 @@ test('offloaded tool-result image stays a placeholder with no hoisted message', 
   )
   assert.deepEqual(body.messages.map(row => row.role), ['assistant', 'tool'])
   assert.match(body.messages[1].content, /offloaded/)
+})
+
+test('reasoning effort is normalized to SenseNova\'s accepted enum', async () => {
+  // SenseNova rejects any other spelling with HTTP 400 "field ReasoningEffort
+  // invalid" (param: reasoning_effort). The harness/OpenAI clients use their
+  // own vocabulary, so the wire body must carry the enum or omit the field.
+  const cases = [
+    ['on', 'high'],
+    ['off', 'none'],
+    ['balanced', 'medium'],
+    ['high', 'high'],
+    ['max', 'max'],
+    ['minimal', 'minimal'],
+    ['xhigh', 'xhigh'],
+    [true, 'high'],
+    [false, 'none'],
+    ['garbage', undefined],
+    ['', undefined],
+    [undefined, undefined],
+  ]
+  for (const [input, expected] of cases) {
+    const { body } = await toChatRequest({
+      model: 'sensenova-6.8-flash-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      reasoningEffort: input,
+    })
+    assert.equal(body.reasoning_effort, expected, `effort ${String(input)}`)
+  }
+})
+
+test('normalizeReasoningEffort maps aliases and drops unknown values', () => {
+  assert.equal(normalizeReasoningEffort('on'), 'high')
+  assert.equal(normalizeReasoningEffort('off'), 'none')
+  assert.equal(normalizeReasoningEffort('x-high'), 'xhigh')
+  assert.equal(normalizeReasoningEffort('enabled'), 'high')
+  assert.equal(normalizeReasoningEffort(' MEDIUM '), 'medium')
+  assert.equal(normalizeReasoningEffort('bogus'), undefined)
 })

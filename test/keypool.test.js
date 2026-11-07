@@ -118,6 +118,48 @@ test('stale alias bindings are pruned when a key disappears', () => {
   assert.equal(second.assign('s1', null).alias, 'k1')
 })
 
+test('the rotation entry takes the next key on every request and cycles the pool', () => {
+  const pool = createKeyPool(entries)
+  const store = createSessionKeyStore({
+    statePath: tempState(),
+    mode: 'manual',
+    defaultKey: 'k1',
+    pool,
+    persist: false,
+  })
+
+  // Every request advances: k1 → k2 → k1 → k2 … no session binding involved.
+  assert.equal(store.assign('s1', '轮换').alias, 'k1')
+  assert.equal(store.assign('s1', '轮换').alias, 'k2')
+  assert.equal(store.assign('s1', '轮换').alias, 'k1')
+  assert.equal(store.assign('s2', '轮换').alias, 'k2')
+  assert.equal(store.assign('s2', '轮换').alias, 'k1')
+
+  // The rotation rows never created a session binding: a plain request on
+  // the same session still follows the normal mode rules (fresh binding).
+  const plain = store.assign('s1', null)
+  assert.equal(plain.alias, 'k1')
+  assert.equal(plain.reason, 'manual')
+})
+
+test('the rotation cursor persists across store instances', () => {
+  const statePath = tempState()
+  const pool = createKeyPool(entries)
+  const first = createSessionKeyStore({ statePath, mode: 'auto', defaultKey: 'k1', pool })
+  assert.equal(first.assign('s1', '轮换').alias, 'k1')
+  assert.equal(first.assign('s1', '轮换').alias, 'k2')
+  const second = createSessionKeyStore({ statePath, mode: 'auto', defaultKey: 'k1', pool })
+  // Wraps to the first key: one full cycle done, starting over.
+  assert.equal(second.assign('s1', '轮换').alias, 'k1')
+})
+
+test('rotation works on an empty-pool day zero with a single key', () => {
+  const pool = createKeyPool([{ alias: 'only', key: 'sk-one' }])
+  const store = createSessionKeyStore({ statePath: tempState(), mode: 'manual', defaultKey: 'only', pool, persist: false })
+  assert.equal(store.assign('s1', '轮换').alias, 'only')
+  assert.equal(store.assign('s1', '轮换').alias, 'only')
+})
+
 test('snapshot masks secrets', () => {
   const pool = createKeyPool(entries)
   const store = createSessionKeyStore({

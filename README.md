@@ -11,6 +11,11 @@ SenseNova provider for DeepSeek Harness with a **per-session key pool**.
 - **Per-key dedicated models**: by default every enabled key also gets its own
   group of `<model>@<alias>` rows in the model picker. Picking one pins that
   session to exactly that key (no round-robin). Adding a key adds a group.
+- **Request-rotation models** (`0.5.0`): every model additionally gets one
+  `<model>@轮换` row. Picking it means "take the NEXT pool key on every
+  request", cycling through the whole pool and wrapping around — no session
+  binding is involved, and the rotation cursor persists in the state file
+  independent of the new-session round-robin cursor.
 - Local OpenAI-compatible gateway with both Chat Completions and the **Codex
   Responses API**.
 
@@ -62,6 +67,31 @@ session B ── picks deepseek-v4-flash@knn ──▶ knn ── every later tu
   disabled keys, so no `@disabled` row exists).
 - `perKeyModels: false` hides the groups again and leaves only the plain rows;
   the aliases still work when typed by hand.
+
+## Request-rotation models (`@轮换`)
+
+Every model — with or without `perKeyModels` — gets one extra row:
+
+```
+deepseek-v4-flash@轮换    ← NEXT pool key on EVERY request, cycling forever
+```
+
+```
+request 1 ──▶ k1
+request 2 ──▶ k2
+request 3 ──▶ k1   (wrapped: one full cycle, starting over)
+request 4 ──▶ k2
+...
+```
+
+- The rotation cursor is **per request**, not per session: sessions, titles,
+  and compaction calls all advance it. It never reads or writes a session
+  binding, so switching between `@轮换` and plain rows never collides.
+- The cursor (`rotationCursor`) persists in the same state file as the
+  new-session round-robin cursor, so a restart resumes mid-cycle.
+- `@轮换` rows survive `perKeyModels: false` — they are not key-qualified.
+- Retries of a failed request reuse the SAME key (the cursor advances once
+  per logical request, not per HTTP attempt).
 - The toggle lives on the Settings page under **Keys**.
 
 ## Retry policy

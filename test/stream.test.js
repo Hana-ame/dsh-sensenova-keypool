@@ -238,3 +238,21 @@ test('mid-stream error closes opened blocks and drops nameless tool calls', asyn
   assert.equal(finish.reason.kind, 'stop') // sawContent → commit partial, not error
   assert.equal(finish.reason.kind, 'stop')
 })
+
+test('cached prompt tokens are subtracted from inputTokens (DSH disjoint contract)', () => {
+  // OpenAI 形状：prompt_tokens 已包含缓存命中 → inputTokens 必须是未缓存部分。
+  assert.deepEqual(
+    mapUsage({
+      prompt_tokens: 261619,
+      completion_tokens: 378,
+      total_tokens: 261997,
+      prompt_tokens_details: { cached_tokens: 260352 },
+    }),
+    { inputTokens: 1267, outputTokens: 378, totalTokens: 261997, cacheReadTokens: 260352 },
+  )
+  // Anthropic 形状：input_tokens 本身已是未缓存值，不能再减。
+  assert.deepEqual(
+    mapUsage({ input_tokens: 1267, output_tokens: 5, cache_read_input_tokens: 260352 }),
+    { inputTokens: 1267, outputTokens: 5, cacheReadTokens: 260352 },
+  )
+})

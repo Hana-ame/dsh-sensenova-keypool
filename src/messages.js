@@ -26,6 +26,56 @@ import { parseModelId } from './catalog.js'
 /** Default per-image byte target before base64 expansion. */
 export const DEFAULT_IMAGE_MAX_BYTES = 20_971_520 // 20 MiB
 
+/**
+ * SenseNova's accepted `reasoning_effort` values.
+ *
+ * The chat route rejects every other spelling with HTTP 400
+ * `field ReasoningEffort invalid, should be one of: none, minimal, low, medium,
+ * high, xhigh, max` (`invalid_request_error`, `param: reasoning_effort`).
+ * Verified against https://token.sensenova.cn/v1 on 2026-11-04: `on` → 400,
+ * `high` / `low` → 200.
+ *
+ * The harness and OpenAI-style clients use their own vocabularies (`on`,
+ * `off`, `balanced`, …), so aliases are mapped into this enum and anything
+ * unknown is dropped instead of being forwarded verbatim. Dropping the field is
+ * always safe: the model falls back to its default thinking level.
+ */
+const CHAT_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+const REASONING_EFFORT_ALIASES = Object.freeze({
+  on: 'high',
+  off: 'none',
+  enabled: 'high',
+  disabled: 'none',
+  balanced: 'medium',
+  auto: 'medium',
+  default: 'medium',
+  medium: 'medium',
+  med: 'medium',
+  minimum: 'minimal',
+  min: 'minimal',
+  maximum: 'max',
+  max: 'max',
+  'x-high': 'xhigh',
+  xhigh: 'xhigh',
+  true: 'high',
+  false: 'none',
+})
+
+/**
+ * Normalize an arbitrary reasoning-effort spelling to SenseNova's enum.
+ *
+ * @param {unknown} value
+ * @returns {string | undefined} an accepted enum value, or undefined to omit.
+ */
+export function normalizeReasoningEffort(value) {
+  if (typeof value === 'boolean') return value ? 'high' : 'none'
+  const text = String(value ?? '').trim().toLowerCase()
+  if (text === '') return undefined
+  if (CHAT_REASONING_EFFORTS.has(text)) return text
+  const alias = REASONING_EFFORT_ALIASES[text]
+  return alias !== undefined && CHAT_REASONING_EFFORTS.has(alias) ? alias : undefined
+}
+
 /** Join text blocks, ignoring non-text protocol blocks. */
 function textOf(content) {
   if (typeof content === 'string') return content
@@ -83,15 +133,6 @@ async function imagesOf(content, deps) {
     else placeholders.push(resolved.placeholder ?? '[image omitted]')
   }
   return { images, placeholders }
-}
-
-function reasoningOf(content) {
-  if (!Array.isArray(content)) return ''
-  const parts = []
-  for (const block of content) {
-    if (block?.type === 'reasoning' && typeof block.text === 'string') parts.push(block.text)
-  }
-  return parts.join('\n')
 }
 
 function toolCallsOf(content) {
@@ -248,10 +289,8 @@ export async function toChatRequest(options, imageDeps = {}) {
 
     if (role === 'assistant') {
       const text = textOf(message.content)
-      const reasoning = reasoningOf(message.content)
       const toolCalls = toolCallsOf(message.content)
       const row = { role: 'assistant', content: text === '' && toolCalls.length > 0 ? null : text }
-      if (reasoning !== '') row.reasoning_content = reasoning
       if (toolCalls.length > 0) row.tool_calls = toolCalls
       liveToolCallIds = new Set(toolCalls.map(call => call.id))
       messages.push(row)
@@ -276,9 +315,8 @@ export async function toChatRequest(options, imageDeps = {}) {
   if (typeof options?.temperature === 'number') body.temperature = options.temperature
   if (typeof options?.maxTokens === 'number') body.max_tokens = options.maxTokens
   if (Array.isArray(options?.stop) && options.stop.length > 0) body.stop = options.stop
-  if (typeof options?.reasoningEffort === 'string' && options.reasoningEffort !== '') {
-    body.reasoning_effort = options.reasoningEffort
-  }
+  const reasoningEffort = normalizeReasoningEffort(options?.reasoningEffort)
+  if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort
 
   if (Array.isArray(options?.tools) && options.tools.length > 0) {
     body.tools = options.tools.map(tool => ({

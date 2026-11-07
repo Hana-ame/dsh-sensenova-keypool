@@ -32,6 +32,14 @@ export const ROUTE = 'sensenova-pool'
 /** Display label used by the model picker. */
 export const ROUTE_LABEL = 'SenseNova · Key Pool'
 
+/**
+ * The request-rotation selector: a reserved alias spelling that means
+ * "rotate to the next key on EVERY request, cycling through the whole pool".
+ * Unlike a real alias it never appears in `pool.aliases`, so it can never
+ * collide with a user-named key.
+ */
+export const ROTATION_ALIAS = '轮换'
+
 /** Default model when a caller omits one. */
 export const DEFAULT_MODEL = 'deepseek-v4-flash'
 
@@ -102,6 +110,37 @@ export const MODELS = Object.freeze([
   }),
 ])
 
+/**
+ * Verified image-capability table (`inputModalities`).
+ *
+ * The upstream `GET /v1/models` metadata — which the Settings refresh copies
+ * into `settings.json` — advertises `image` input for models whose chat route
+ * actually rejects `image_url`. The harness uses `inputModalities` to decide
+ * whether to keep an image block or offload it to text, so a wrong `image`
+ * declaration turns every `read_image` / screenshot turn into a hard
+ * `HTTP 400 inference request is invalid` (`invalid_parameter_error`).
+ *
+ * Measured against https://token.sensenova.cn/v1 on 2026-11-04 (1x1 PNG):
+ *   glm-5.2                    text 200 / image 400  ← text-only at the wire
+ *   sensenova-6.8-flash-lite   text 200 / image 200
+ *   sensenova-6.8-flash        text 200 / image 200
+ *   kimi-k3, deepseek-flash    unverified (429) — settings value is kept
+ *
+ * Only ids listed here are clamped. Unknown ids keep the declared value so a
+ * genuinely new image model still works before this table catches up.
+ */
+export const VERIFIED_INPUT_MODALITIES = Object.freeze({
+  'glm-5.2': Object.freeze(['text']),
+  'sensenova-6.8-flash-lite': Object.freeze(['text', 'image']),
+  'sensenova-6.8-flash': Object.freeze(['text', 'image']),
+})
+
+/** Clamp a model's declared modalities to the verified truth for known ids. */
+function verifiedModalities(id, declared) {
+  const verified = VERIFIED_INPUT_MODALITIES[id]
+  return verified !== undefined ? [...verified] : [...(declared ?? ['text'])]
+}
+
 /** Look up a catalog row by base model id. */
 export function findModel(id, models = MODELS) {
   return models.find(row => row.id === id) ?? null
@@ -123,6 +162,16 @@ export function parseModelId(model) {
   const modelId = text.slice(0, at)
   const alias = text.slice(at + 1)
   return { modelId, alias: alias === '' ? null : alias }
+}
+
+/**
+ * Whether this model id names the request-rotation entry (a
+ * `<model>@轮换` row): every request takes the next key in pool order,
+ * wrapping back to the first key after the last.
+ */
+export function isRotationModelId(model) {
+  const { alias } = parseModelId(model)
+  return alias === ROTATION_ALIAS
 }
 
 /** Whether a string looks like a key alias (`k1`, `work`, ...). */
@@ -168,12 +217,21 @@ export function catalogRows(provider, models = MODELS, options = {}) {
   const perKey = options.perKeyModels !== false && keys.length > 0
   const rows = []
   for (const model of models) {
-    const inputModalities = [...(model.inputModalities ?? ['text'])]
+    const inputModalities = verifiedModalities(model.id, model.inputModalities)
     rows.push({
       provider,
       id: model.id,
       name: model.name,
       description: model.description,
+      inputModalities: [...inputModalities],
+    })
+    // Request-rotation entry: one extra row per model. It shares the same
+    // upstream model id but takes the NEXT pool key on every request.
+    rows.push({
+      provider,
+      id: keyQualifiedModelId(model.id, ROTATION_ALIAS),
+      name: `${model.name} · 轮换`,
+      description: `${model.description === '' ? '' : `${model.description} `}[每次请求换下一个 key]`,
       inputModalities: [...inputModalities],
     })
     if (!perKey) continue
@@ -221,11 +279,17 @@ export function resolveModelInfo(provider, model, models = MODELS) {
   return {
     provider,
     id: model,
-    name: alias === null ? base.name : `${base.name} · ${alias}`,
+    name: alias === null
+      ? base.name
+      : alias === ROTATION_ALIAS
+        ? `${base.name} · 轮换`
+        : `${base.name} · ${alias}`,
     description: alias === null || base.description === ''
       ? base.description
-      : `${base.description} [key ${alias}]`,
-    inputModalities: [...(base.inputModalities ?? ['text'])],
+      : alias === ROTATION_ALIAS
+        ? `${base.description} [每次请求换下一个 key]`
+        : `${base.description} [key ${alias}]`,
+    inputModalities: verifiedModalities(modelId, base.inputModalities),
     context: { contextWindow: base.contextWindow },
     defaultMaxTokens: base.maxOutput,
   }

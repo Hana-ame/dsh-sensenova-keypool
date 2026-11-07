@@ -22,6 +22,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { postChat, readJson, UpstreamError } from './upstream.js'
 import { parseSseStream } from './stream.js'
 import { collectResponse, encodeResponseEvents, responsesToChat } from './responses.js'
+import { normalizeReasoningEffort } from './messages.js'
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024
 
@@ -198,6 +199,16 @@ async function handleChat(req, res, adapter, warn) {
   })
 
   const upstreamBody = { ...body, model: parsedModelId(model) }
+  // This route forwards the client body verbatim (it is an OpenAI-compatible
+  // passthrough), so SenseNova's `reasoning_effort` enum must be enforced here
+  // too. Clients such as the OpenAI SDK / Codex send their own vocabulary
+  // (`on`, `off`, `balanced`, …) and the upstream answers HTTP 400
+  // "field ReasoningEffort invalid". Map or drop it before forwarding.
+  if ('reasoning_effort' in upstreamBody) {
+    const reasoningEffort = normalizeReasoningEffort(upstreamBody.reasoning_effort)
+    if (reasoningEffort === undefined) delete upstreamBody.reasoning_effort
+    else upstreamBody.reasoning_effort = reasoningEffort
+  }
   const stream = body.stream === true
   upstreamBody.stream = stream
 

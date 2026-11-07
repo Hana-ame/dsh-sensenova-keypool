@@ -23,7 +23,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { maskKey } from './catalog.js'
+import { maskKey, ROTATION_ALIAS } from './catalog.js'
 
 /**
  * Build the immutable alias→secret pool.
@@ -56,7 +56,7 @@ export function createKeyPool(entries = []) {
 }
 
 function emptyState() {
-  return { version: 1, cursor: 0, sessions: {}, updatedAt: new Date().toISOString() }
+  return { version: 1, cursor: 0, rotationCursor: 0, sessions: {}, updatedAt: new Date().toISOString() }
 }
 
 function readState(filePath) {
@@ -64,10 +64,11 @@ function readState(filePath) {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return emptyState()
     const cursor = Number.isInteger(parsed.cursor) && parsed.cursor >= 0 ? parsed.cursor : 0
+    const rotationCursor = Number.isInteger(parsed.rotationCursor) && parsed.rotationCursor >= 0 ? parsed.rotationCursor : 0
     const sessions = parsed.sessions !== null && typeof parsed.sessions === 'object' && !Array.isArray(parsed.sessions)
       ? parsed.sessions
       : {}
-    return { version: 1, cursor, sessions: { ...sessions }, updatedAt: String(parsed.updatedAt ?? '') }
+    return { version: 1, cursor, rotationCursor, sessions: { ...sessions }, updatedAt: String(parsed.updatedAt ?? '') }
   } catch {
     return emptyState()
   }
@@ -131,15 +132,31 @@ export function createSessionKeyStore({
   /**
    * Pick the alias for a request.
    *
+   * The reserved alias `轮换` (a `<model>@轮换` row) is the request-rotation
+   * entry: it takes the next key in pool order on EVERY request — no session
+   * binding is created or read — and wraps back to the first key after the
+   * last one, so the pool is cycled repeatedly. The rotation cursor is
+   * independent from the new-session round-robin cursor: it advances per
+   * request, not per session.
+   *
    * @param {string | undefined} sessionId
    * @param {string | null | undefined} explicitAlias
-   * @returns {{alias: string, key: string, reason: 'explicit'|'session'|'manual'|'round-robin'|'anonymous'}}
+   * @returns {{alias: string, key: string, reason: 'explicit'|'session'|'manual'|'round-robin'|'anonymous'|'rotation'}}
    * @throws {Error} when the pool is empty or the alias is unknown.
    */
   function assign(sessionId, explicitAlias) {
     if (pool.size === 0) throw new Error('no API keys configured')
 
     const session = sessionId === undefined || sessionId === null ? '' : String(sessionId)
+
+    // Request-rotation entry: every request takes the next key, cycling
+    // through the pool. No session binding is touched.
+    if (explicitAlias === ROTATION_ALIAS) {
+      const alias = pool.aliases[state.rotationCursor % pool.size]
+      state.rotationCursor = (state.rotationCursor + 1) % pool.size
+      save()
+      return { alias, key: pool.resolve(alias), reason: 'rotation' }
+    }
 
     if (explicitAlias !== undefined && explicitAlias !== null && explicitAlias !== '') {
       if (!pool.has(explicitAlias)) {
@@ -201,6 +218,7 @@ export function createSessionKeyStore({
       mode,
       defaultKey,
       cursor: state.cursor,
+      rotationCursor: state.rotationCursor,
       poolSize: pool.size,
       keys: pool.masked,
       sessions: Object.entries(state.sessions).map(([sessionId, alias]) => ({ sessionId, alias })),

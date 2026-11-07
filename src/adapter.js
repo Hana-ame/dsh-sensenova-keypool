@@ -65,6 +65,38 @@ function textOnlyImageText(ref) {
   return `[image omitted because this model accepts text only; attachment sha256:${attachmentId.slice(7, 15)}]`
 }
 
+/**
+ * Drop every `image_url` part from an OpenAI chat body, leaving a text
+ * placeholder where a message would otherwise become empty.
+ *
+ * Used only for the one-shot degradation after a route rejects image input with
+ * HTTP 400: the turn continues as text instead of failing outright, and a
+ * model whose `inputModalities` lied is at least still usable.
+ *
+ * @param {object} body - OpenAI chat-completions body.
+ * @returns {object}
+ */
+function stripImages(body) {
+  const messages = body.messages.map(message => {
+    if (!Array.isArray(message.content)) return message
+    const parts = []
+    let dropped = 0
+    for (const part of message.content) {
+      if (part?.type === 'image_url') {
+        dropped += 1
+        continue
+      }
+      parts.push(part)
+    }
+    if (dropped === 0) return message
+    if (parts.length === 0 || !parts.some(part => part?.type === 'text')) {
+      parts.unshift({ type: 'text', text: '[image omitted: the model route rejected image input]' })
+    }
+    return { ...message, content: parts }
+  })
+  return { ...body, messages }
+}
+
 function failureOf(error) {
   if (error instanceof UpstreamError) {
     return {
@@ -402,10 +434,32 @@ export class SensenovaKeyPoolAdapter {
     let totalUsage
     let streamedAnyText = false // text/reasoning produced across all rounds of this turn
     let lastRoundUsage
+    // A route/model can advertise image input yet reject `image_url` at the wire
+    // (verified: glm-5.2 → HTTP 400 "inference request is invalid"). Keep the
+    // image-bearing body for the first dispatch, then degrade once to text so a
+    // misdeclared model or a stale settings.json cannot kill the whole turn.
+    let activeBody = baseBody
+    let imagesDegraded = false
+    const bodyCarriesImages = baseBody.messages.some(message =>
+      Array.isArray(message.content) && message.content.some(part => part?.type === 'image_url'))
 
     for (let round = 0; ; round += 1) {
-      const body = round === 0 ? baseBody : { ...baseBody, messages }
-      const { response, lastError } = await dispatch(body)
+      let body = round === 0 ? activeBody : { ...activeBody, messages }
+      let { response, lastError } = await dispatch(body)
+
+      if (response === null && round === 0 && !imagesDegraded && bodyCarriesImages) {
+        const imageFailure = failureOf(lastError)
+        if (imageFailure.code === 'BAD_REQUEST') {
+          imagesDegraded = true
+          activeBody = stripImages(activeBody)
+          messages = activeBody.messages
+          body = activeBody
+          fail(`image input rejected (${imageFailure.message}); retrying as text`)
+          const retried = await dispatch(body)
+          response = retried.response
+          lastError = retried.lastError
+        }
+      }
 
       if (response === null) {
         const failure = failureOf(lastError)
@@ -531,9 +585,10 @@ export class SensenovaKeyPoolAdapter {
       fail(`auto-continue ${round + 1}/${maxRounds} after max-token truncation`)
 
       // Feed the partial answer back so the model continues from exactly where
-      // it stopped; reasoning content keeps thinking models coherent.
+      // it stopped. Do NOT echo reasoning_content: it is a response-only field,
+      // and SenseNova rejects requests carrying it with HTTP 400
+      // "inference request is invalid" (code 3). See messages.js toChatRequest.
       const assistant = { role: 'assistant', content: roundText === '' ? null : roundText }
-      if (roundReasoning !== '') assistant.reasoning_content = roundReasoning
       messages = [...messages, assistant, { role: 'user', content: continuePrompt }]
     }
   }

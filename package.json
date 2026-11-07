@@ -1,9 +1,9 @@
 {
   "name": "dsh-sensenova-keypool",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
-  "description": "SenseNova provider with a multi-key pool and a Settings page for entering keys. Each DSH session is pinned to one key; automatic round-robin or manual selection is preserved, and every key additionally gets its own dedicated model group (@alias, never round-robins). Also exposes an OpenAI-compatible local gateway with Chat Completions and Codex Responses endpoints.",
+  "description": "SenseNova provider with a multi-key pool and a Settings page for entering keys. Each DSH session is pinned to one key; automatic round-robin or manual selection is preserved, and every key additionally gets its own dedicated model group (@alias, never round-robins). Every model also gets a request-rotation entry (@轮换) that takes the NEXT pool key on every request, cycling through the pool. Also exposes an OpenAI-compatible local gateway with Chat Completions and Codex Responses endpoints.",
   "author": "nanaka",
   "main": "./index.js",
   "exports": {

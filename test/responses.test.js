@@ -78,3 +78,19 @@ test('collects a non-streaming Responses object', async () => {
   assert.equal(response.output[0].type, 'message')
   assert.equal(response.output[0].content[0].text, 'Hello Codex')
 })
+
+test('Responses reasoning effort is normalized before hitting the chat wire', () => {
+  const { body } = responsesToChat({
+    model: 'sensenova-6.8-flash-lite',
+    reasoning: { effort: 'on' },
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+  })
+  assert.equal(body.reasoning_effort, 'high')
+
+  const dropped = responsesToChat({
+    model: 'sensenova-6.8-flash-lite',
+    reasoning: { effort: 'garbage' },
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+  }).body
+  assert.equal('reasoning_effort' in dropped, false)
+})

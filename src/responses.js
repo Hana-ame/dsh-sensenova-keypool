@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { normalizeReasoningEffort } from './messages.js'
 
 const shortId = prefix => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 24)}`
 
@@ -111,7 +112,10 @@ export function responsesToChat(body, fallbackModel = 'sensenova-6.8-flash-lite'
   if (typeof request.max_output_tokens === 'number') chat.max_tokens = request.max_output_tokens
   if (typeof request.temperature === 'number') chat.temperature = request.temperature
   if (typeof request.top_p === 'number') chat.top_p = request.top_p
-  if (typeof request.reasoning?.effort === 'string') chat.reasoning_effort = request.reasoning.effort
+  // SenseNova only accepts none|minimal|low|medium|high|xhigh|max; the Responses
+  // API speaks its own vocabulary and an unnormalized value is an HTTP 400.
+  const reasoningEffort = normalizeReasoningEffort(request.reasoning?.effort)
+  if (reasoningEffort !== undefined) chat.reasoning_effort = reasoningEffort
   if (request.tool_choice !== undefined) chat.tool_choice = request.tool_choice
   if (typeof request.parallel_tool_calls === 'boolean') chat.parallel_tool_calls = request.parallel_tool_calls
 
@@ -331,9 +335,17 @@ export async function* encodeResponseEvents(chunks, options = {}) {
     ...(usage !== undefined
       ? {
           usage: {
-            input_tokens: usage.inputTokens ?? 0,
+            // OpenAI Responses 语义：input_tokens 是完整输入（含缓存命中/写入）。
+            // DSH 的 TokenUsage 是 disjoint 计数，回显时必须把缓存加回去。
+            input_tokens:
+              (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
             output_tokens: usage.outputTokens ?? 0,
-            total_tokens: usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
+            total_tokens:
+              usage.totalTokens ??
+              (usage.inputTokens ?? 0) +
+                (usage.cacheReadTokens ?? 0) +
+                (usage.cacheWriteTokens ?? 0) +
+                (usage.outputTokens ?? 0),
             ...(usage.reasoningTokens !== undefined
               ? { output_tokens_details: { reasoning_tokens: usage.reasoningTokens } }
               : {}),
@@ -411,9 +423,17 @@ export async function collectResponse(chunks, options = {}) {
     ...(usage !== undefined
       ? {
           usage: {
-            input_tokens: usage.inputTokens ?? 0,
+            // OpenAI Responses 语义：input_tokens 是完整输入（含缓存命中/写入）。
+            // DSH 的 TokenUsage 是 disjoint 计数，回显时必须把缓存加回去。
+            input_tokens:
+              (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
             output_tokens: usage.outputTokens ?? 0,
-            total_tokens: usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
+            total_tokens:
+              usage.totalTokens ??
+              (usage.inputTokens ?? 0) +
+                (usage.cacheReadTokens ?? 0) +
+                (usage.cacheWriteTokens ?? 0) +
+                (usage.outputTokens ?? 0),
           },
         }
       : {}),
