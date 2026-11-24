@@ -319,14 +319,27 @@ export async function toChatRequest(options, imageDeps = {}) {
   if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort
 
   if (Array.isArray(options?.tools) && options.tools.length > 0) {
-    body.tools = options.tools.map(tool => ({
-      type: 'function',
-      function: {
-        name: String(tool.name ?? ''),
-        description: String(tool.description ?? ''),
-        parameters: tool.parameters ?? { type: 'object', properties: {} },
-      },
-    }))
+    // A tool whose function.name is empty/null is unusable: SenseNova rejects
+    // the whole request with HTTP 400 "inference request is invalid"
+    // (verified 2026-11-25: `function: {name: ''}` or `name: null` → 400;
+    // a whitespace-only name is accepted). Drop such tools instead of letting
+    // one degenerate registration poison every dispatch.
+    const declared = options.tools
+      .filter(tool => tool !== null && typeof tool === 'object')
+      .filter(tool => {
+        const name = String(tool?.name ?? '')
+        return name.trim() !== ''
+      })
+    if (declared.length > 0) {
+      body.tools = declared.map(tool => ({
+        type: 'function',
+        function: {
+          name: String(tool.name),
+          description: String(tool.description ?? ''),
+          parameters: tool.parameters ?? { type: 'object', properties: {} },
+        },
+      }))
+    }
   }
 
   return { body, modelId, alias }
