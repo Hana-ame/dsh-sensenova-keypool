@@ -328,6 +328,45 @@ export class SensenovaKeyPoolAdapter {
         maxRequestImageBytes: settings.maxRequestImageBytes,
       },
     )
+
+    // Request-size guard: SenseNova's OpenAI-compatible endpoint rejects an
+    // oversized request body with HTTP 400 `inference request is invalid`
+    // (`invalid_request_error`, `code: InvalidParameter`) — verified 2026-11-25
+    // against https://token.sensenova.cn/v1: a body built from a single uniform
+    // filler at ~5 MB → HTTP 200, while ≥8 MB → HTTP 400 with that code. This
+    // 400 is NOT retryable, so an oversized turn would otherwise die outright
+    // ("处理失败") instead of compacting. The serialized JSON is an exact upper
+    // bound on the wire size, so measuring it here lets the turn end as
+    // CONTEXT_WINDOW_EXCEEDED and hand off to the harness's compaction.
+    const maxRequestBytes = Number(settings.maxRequestBytes) > 0
+      ? Number(settings.maxRequestBytes)
+      : 9 * 1024 * 1024
+    let requestBytes
+    try {
+      requestBytes = Buffer.byteLength(JSON.stringify(baseBody))
+    } catch {
+      requestBytes = undefined
+    }
+    if (requestBytes !== undefined && requestBytes > maxRequestBytes) {
+      this.deps.warn?.(
+        `sensenova-keypool: request body ${requestBytes} bytes exceeds limit ${maxRequestBytes}; ` +
+          'ending turn as CONTEXT_WINDOW_EXCEEDED so the harness compacts',
+      )
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            code: 'CONTEXT_WINDOW_EXCEEDED',
+            message:
+              `sensenova-keypool: request body too large (${requestBytes} bytes > ${maxRequestBytes} limit); ` +
+              'compaction is required to continue',
+          },
+        },
+      }
+      return
+    }
+
     const maxRetries = settings.maxRetries
     const sleep = this.deps.sleep ?? sleepDefault
 

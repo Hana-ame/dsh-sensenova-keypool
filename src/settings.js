@@ -37,6 +37,12 @@ export const DEFAULTS = Object.freeze({
   retryMaxDelayMs: 6_000,
   retryableCodes: Object.freeze(['RATE_LIMIT', 'TIMEOUT', 'SERVER', 'TRANSPORT']),
   maxRequestImageBytes: 20_971_520,
+  // Request-body size guard (see adapter.js stream()). SenseNova returns HTTP
+  // 400 `inference request is invalid` (code InvalidParameter) for an oversized
+  // request body, which is not retryable — so an oversized turn must be caught
+  // here and ended as CONTEXT_WINDOW_EXCEEDED (→ harness compaction) instead.
+  // Default 9 MiB sits below the upstream hard body cap and above typical turns.
+  maxRequestBytes: 9_437_184,
   defaultModel: 'deepseek-v4-flash',
   // Per-key model rows: besides the round-robin/session-pinned catalog, every
   // enabled key alias is advertised as `<model>@<alias>` in the picker. Picking
@@ -308,6 +314,7 @@ export function loadSettings(options = {}) {
   settings.statePath = String(settings.statePath ?? DEFAULTS.statePath)
   settings.timeoutMs = positiveNumber(settings.timeoutMs, DEFAULTS.timeoutMs)
   settings.maxRequestImageBytes = positiveNumber(settings.maxRequestImageBytes, DEFAULTS.maxRequestImageBytes)
+  settings.maxRequestBytes = positiveNumber(settings.maxRequestBytes, DEFAULTS.maxRequestBytes)
   settings.maxRetries = Number.isInteger(settings.maxRetries) && settings.maxRetries >= 0
     ? settings.maxRetries
     : DEFAULTS.maxRetries
