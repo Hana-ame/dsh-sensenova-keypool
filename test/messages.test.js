@@ -327,3 +327,51 @@ test('normalizeReasoningEffort maps aliases and drops unknown values', () => {
   assert.equal(normalizeReasoningEffort(' MEDIUM '), 'medium')
   assert.equal(normalizeReasoningEffort('bogus'), undefined)
 })
+
+test('a tool whose parameters are a bare property map is wrapped as an object schema', async () => {
+  // SenseNova rejects a tool whose `parameters` is not a JSON-Schema object with
+  // HTTP 400 "inference request is invalid" (code InvalidParameter) for the
+  // whole request. The harness's `resume_goal` tool registers its params as a
+  // bare property map (`{ goal_id: {...} }`) instead of
+  // `{ type: 'object', properties: {...} }`; wrapping it is what makes the
+  // request succeed (verified against token.sensenova.cn/v1, 2026-11-25).
+  const { body } = await toChatRequest({
+    model: 'deepseek-flash',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [
+      {
+        name: 'resume_goal',
+        description: 'Rearm the session goal.',
+        parameters: {
+          goal_id: { type: 'string', description: 'Exact id.' },
+          revision: { type: 'number', description: 'Exact revision.' },
+        },
+      },
+      {
+        // Already a proper object schema must be passed through untouched.
+        name: 'already_valid',
+        description: 'Normal tool.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    ],
+  })
+  assert.equal(body.tools.length, 2)
+  const [wrapped, untouched] = body.tools.map(t => t.function.parameters)
+  assert.deepEqual(wrapped, {
+    type: 'object',
+    properties: {
+      goal_id: { type: 'string', description: 'Exact id.' },
+      revision: { type: 'number', description: 'Exact revision.' },
+    },
+  })
+  assert.deepEqual(untouched, { type: 'object', properties: { path: { type: 'string' } } })
+})
+
+test('a tool with no parameters still gets an empty object schema', async () => {
+  const { body } = await toChatRequest({
+    model: 'deepseek-flash',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ name: 'no_params', description: 'No params at all.' }],
+  })
+  assert.deepEqual(body.tools[0].function.parameters, { type: 'object', properties: {} })
+})

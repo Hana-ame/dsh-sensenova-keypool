@@ -23,6 +23,35 @@
 
 import { parseModelId } from './catalog.js'
 
+/**
+ * Coerce one tool's declared `parameters` into a JSON-Schema object schema.
+ *
+ * Some tools register `parameters` as the bare property map (`{ goal_id: {...} }`)
+ * instead of a proper object schema (`{ type: 'object', properties: {...} }`).
+ * OpenAI-compatible providers that strictly validate the schema reject such a
+ * definition for the whole request with HTTP 400 `inference request is invalid`
+ * (`invalid_request_error`, `code: InvalidParameter`). Verified 2026-11-25
+ * against https://token.sensenova.cn/v1: the `resume_goal` tool from the
+ * harness carries bare properties, and including it alone fails the entire
+ * request; wrapping it as `{ type: 'object', properties: <bare map> }`
+ * returns 200. Already-valid schemas are returned untouched.
+ *
+ * @param {unknown} parameters
+ * @returns {object} a JSON-Schema object schema
+ */
+function normalizeParameters(parameters) {
+  if (parameters !== null && typeof parameters === 'object') {
+    if (parameters.type === 'object' && typeof parameters.properties === 'object' && parameters.properties !== null) {
+      return parameters
+    }
+    // Looks like a bare property map (no `type`, has keys): wrap it.
+    if (parameters.type === undefined && Object.keys(parameters).length > 0) {
+      return { type: 'object', properties: parameters }
+    }
+  }
+  return parameters ?? { type: 'object', properties: {} }
+}
+
 /** Default per-image byte target before base64 expansion. */
 export const DEFAULT_IMAGE_MAX_BYTES = 20_971_520 // 20 MiB
 
@@ -336,7 +365,7 @@ export async function toChatRequest(options, imageDeps = {}) {
         function: {
           name: String(tool.name),
           description: String(tool.description ?? ''),
-          parameters: tool.parameters ?? { type: 'object', properties: {} },
+          parameters: normalizeParameters(tool.parameters),
         },
       }))
     }
