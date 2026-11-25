@@ -338,16 +338,24 @@ export class SensenovaKeyPoolAdapter {
     // ("处理失败") instead of compacting. The serialized JSON is an exact upper
     // bound on the wire size, so measuring it here lets the turn end as
     // CONTEXT_WINDOW_EXCEEDED and hand off to the harness's compaction.
+    //
+    // MUST bypass the compaction summarizer's own call (options.purpose ===
+    // 'compaction'): it re-sends the same oversized history to produce the
+    // summary, so blocking it here would make compaction itself fail with the
+    // same 400 — a deadlock. Only ordinary (agent) requests are guarded; the
+    // summarizer is allowed through even when oversized, because shrinking the
+    // body is exactly what it exists to do.
     const maxRequestBytes = Number(settings.maxRequestBytes) > 0
       ? Number(settings.maxRequestBytes)
       : 9 * 1024 * 1024
+    const isCompactionCall = options?.purpose === 'compaction'
     let requestBytes
     try {
       requestBytes = Buffer.byteLength(JSON.stringify(baseBody))
     } catch {
       requestBytes = undefined
     }
-    if (requestBytes !== undefined && requestBytes > maxRequestBytes) {
+    if (!isCompactionCall && requestBytes !== undefined && requestBytes > maxRequestBytes) {
       this.deps.warn?.(
         `sensenova-keypool: request body ${requestBytes} bytes exceeds limit ${maxRequestBytes}; ` +
           'ending turn as CONTEXT_WINDOW_EXCEEDED so the harness compacts',
